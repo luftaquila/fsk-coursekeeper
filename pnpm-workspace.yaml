@@ -1,5 +1,6 @@
 packages:
   - course
+  - console
   - rover/hub
 allowBuilds:
   better-sqlite3: true

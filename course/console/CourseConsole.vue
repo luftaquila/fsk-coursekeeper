@@ -102,7 +102,9 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <MapView />
+  <MapView>
+    <template #status-actions><slot name="status-actions" /></template>
+  </MapView>
 
   <!-- SSE 재연결 진행 중 표시: 무음 freeze 방지용. 자동 화해는 onopen 에서
        일어나므로 이 배지는 시각적 신호만 담당. -->
