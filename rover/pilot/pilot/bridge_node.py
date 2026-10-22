@@ -102,6 +102,8 @@ class BridgeNode(Node):
         # never from ros params, to keep them off the `ros2 param get` surface.
         self._internal_secret = os.environ.get('INTERNAL_SECRET', '')
         self._rover_secret = os.environ.get('ROVER_SECRET', '')
+        # The pilot image's release version (baked at build), shown in the console.
+        self._version = os.environ.get('COURSEKEEPER_VERSION', '') or 'dev'
 
         url = self.get_parameter('server_url').value
         allow_http = self.get_parameter('server_url_allow_http').value
@@ -784,7 +786,8 @@ class BridgeNode(Node):
         headers['Cache-Control'] = 'no-cache'
 
         resp = requests.get(
-            f'{url}/api/rover/stream?protocol_version=2&boot_id={self._boot_id}',
+            f'{url}/api/rover/stream',
+            params={'protocol_version': 2, 'boot_id': self._boot_id, 'version': self._version},
             headers=headers,
             stream=True,
             # connect timeout, read timeout. Server heartbeat is 10s, so a 25s

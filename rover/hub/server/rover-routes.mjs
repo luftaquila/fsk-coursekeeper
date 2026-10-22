@@ -48,6 +48,8 @@ const CONTROL_SESSION_GAP_MS = 5 * 60 * 1000;
 const CONTROL_WARN_INTERVAL_MS = 60 * 1000;
 
 const positiveNumber = (value, fallback) => (Number(value) > 0 ? Number(value) : fallback);
+// The pilot image's version as bridge_node announces it (a tag, edge-<sha>, or dev).
+const announcedVersion = (value) => (typeof value === "string" && /^[A-Za-z0-9._+-]{1,64}$/.test(value) ? value : null);
 
 export function registerRoverRoutes({
   deviceApp,
@@ -114,6 +116,7 @@ export function registerRoverRoutes({
     battery: null, // { voltage, voltage_raw, percent, source, gain, measured_v, calibrated_at, flags }
     ntrip: null, // { host, port, mountpoint, fail_count, last_error, last_correction_at, bytes_received }
     gps: null, // { h_acc, v_acc, altitude, speed, heading, num_sv, pdop, tdop }
+    pilot_version: null, // announced by the connected (or last connected) rover
     updated_at: 0,
   };
 
@@ -379,6 +382,7 @@ export function registerRoverRoutes({
 
     roverProtocolVersion = nextProtocolVersion;
     roverBootId = announcedBootId;
+    roverState.pilot_version = announcedVersion(req.query.version);
     if (roverProtocolVersion === MISSION_PROTOCOL_VERSION && roverBootId) {
       if (previousBootId !== roverBootId) pendingEmergencyClear = null;
       const beforeBootReconcile = missionV2.activeMission();

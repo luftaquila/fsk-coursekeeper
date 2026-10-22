@@ -17,8 +17,11 @@ COPY rover/hub/index.mjs rover/hub/
 COPY rover/hub/server rover/hub/server
 
 FROM docker.io/library/node:22-alpine
+# Release version (a tag, edge-<sha>, or dev), reported in the hub's device info.
+ARG VERSION=dev
 ENV NODE_ENV=production \
-    HUB_DB_PATH=/var/lib/fsk-coursekeeper-hub/hub.db
+    HUB_DB_PATH=/var/lib/fsk-coursekeeper-hub/hub.db \
+    COURSEKEEPER_VERSION=${VERSION}
 WORKDIR /app
 # rover/hub/node_modules links into the workspace store under /app/node_modules.
 COPY --from=build /src/node_modules node_modules

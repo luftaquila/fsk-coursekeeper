@@ -44,6 +44,7 @@ describe("hub process", () => {
       HUB_ALLOWED_ORIGINS: "https://a.example, https://b.example/",
       HUB_DEVICE_ID: "pi-rover",
       HUB_DEVICE_NAME: "Rover One",
+      COURSEKEEPER_VERSION: "v1.2.3",
       MISSION_TELEMETRY_MAX_ROWS: "1000",
       ROVER_MAX_WAYPOINT_DIST_M: "150",
       ROVER_MAX_SEGMENT_DIST_M: "40",
@@ -58,7 +59,7 @@ describe("hub process", () => {
 
       const status = await fetch(`${operatorUrl}/api/rover/status`, { headers: { Origin: "https://b.example" } });
       assert.equal(status.headers.get("access-control-allow-origin"), "https://b.example");
-      assert.deepEqual((await status.json()).device, { id: "pi-rover", name: "Rover One", kind: "rover" });
+      assert.deepEqual((await status.json()).device, { id: "pi-rover", name: "Rover One", kind: "rover", version: "v1.2.3" });
       assert.equal((await fetch(`${deviceUrl}/api/rover/status`)).status, 404);
 
       // Open streams must not hold the shutdown.

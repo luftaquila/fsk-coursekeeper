@@ -339,7 +339,7 @@ class TestStatus:
         agent, _, _ = make_agent()
         status = agent.status()
         assert status["device"] == {"id": "fsk-coursekeeper-gps", "name": "fsk-coursekeeper-gps",
-                                    "kind": "gps"}
+                                    "kind": "gps", "version": "dev"}
         assert status["receiver_connected"] is False  # no serial opened
         assert status["mode"] == "capture"
         assert status["fix_status"] is None and status["gps"] is None

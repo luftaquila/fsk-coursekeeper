@@ -602,7 +602,7 @@ describe("rover telemetry and status", () => {
 
   it("reports the device identity and NTRIP source, without the removed receiver fields", async () => {
     const status = await ctx.status();
-    assert.deepEqual(status.device, { id: "rover-test", name: "Test Rover", kind: "rover" });
+    assert.deepEqual(status.device, { id: "rover-test", name: "Test Rover", kind: "rover", version: "dev" });
     assert.ok(status.ntrip_source && typeof status.ntrip_source === "object");
     assert.ok("last_disconnect_reason" in status);
     assert.ok("last_disconnect_at" in status);
@@ -631,8 +631,24 @@ describe("rover telemetry and status", () => {
 
   it("defaults the device name to its id", async () => {
     await withHub(async (local) => {
-      assert.deepEqual((await local.status()).device, { id: "pi-rover-3", name: "pi-rover-3", kind: "rover" });
+      assert.deepEqual((await local.status()).device, { id: "pi-rover-3", name: "pi-rover-3", kind: "rover", version: "dev" });
     }, { deviceId: "pi-rover-3", deviceName: undefined });
+  });
+
+  it("reports the hub version and the version the rover announces", async () => {
+    await withHub(async (local) => {
+      const status = await local.status();
+      assert.equal(status.device.version, "v1.2.3");
+      assert.equal(status.pilot_version, null);
+      const rover = await local.openRover("boot-version", { version: "edge-abc1234" });
+      assert.equal((await local.status()).pilot_version, "edge-abc1234");
+      await rover.close();
+      // The last announced version stays visible while the rover is away.
+      assert.equal((await local.status()).pilot_version, "edge-abc1234");
+      const odd = await local.openRover("boot-version-2", { version: "v1 <b>" });
+      assert.equal((await local.status()).pilot_version, null);
+      await odd.close();
+    }, { version: "v1.2.3" });
   });
 
   it("requires a valid boot_id on a protocol v2 stream", async () => {

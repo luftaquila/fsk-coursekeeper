@@ -73,6 +73,7 @@ export function createHubApp(options = {}) {
     dbPath,
     deviceId = os.hostname(),
     deviceName,
+    version = "dev",
     allowedOrigins = [],
     deviceStaleMs,
     deviceWatchdogTickMs,
@@ -88,6 +89,7 @@ export function createHubApp(options = {}) {
     id: deviceId.trim(),
     name: typeof deviceName === "string" && deviceName.trim() ? deviceName.trim() : deviceId.trim(),
     kind: "rover",
+    version: typeof version === "string" && version.trim() ? version.trim() : "dev",
   });
 
   const db = openDatabase(dbPath);
@@ -167,6 +169,7 @@ export async function main() {
     dbPath: process.env.HUB_DB_PATH || DEFAULT_DB_PATH,
     deviceId: process.env.HUB_DEVICE_ID || os.hostname(),
     deviceName: process.env.HUB_DEVICE_NAME,
+    version: process.env.COURSEKEEPER_VERSION,
     allowedOrigins: (process.env.HUB_ALLOWED_ORIGINS || "").split(",").map((value) => value.trim()).filter(Boolean),
     telemetryMaxRows: envInteger("MISSION_TELEMETRY_MAX_ROWS", DEFAULT_TELEMETRY_MAX_ROWS, 1, Number.MAX_SAFE_INTEGER),
     maxWaypointDistM: envPositiveNumber("ROVER_MAX_WAYPOINT_DIST_M", DEFAULT_MAX_WAYPOINT_DIST_M),

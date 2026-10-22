@@ -15,5 +15,7 @@ export function createLocalHost({ course, settings }) {
     access: { permission: () => allowed },
     features: { publication: false },
     publicCourses: null,
+    // Set by the release build; local builds are "dev".
+    version: import.meta.env.VITE_COURSEKEEPER_VERSION || "dev",
   };
 }

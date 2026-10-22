@@ -652,6 +652,21 @@ const remainingDistanceM = computed(() => {
   return pathTotalDist * Math.max(0, (100 - pathProgress.value) / 100);
 });
 
+// Release versions. A console or device built from a release reports its tag
+// (vX.Y.Z); edge and dev builds report another name and are never flagged.
+const RELEASE_VERSION = /^v\d+\.\d+\.\d+$/;
+const consoleVersion = host.version || "dev";
+function versionRow(key, version) {
+  if (!version) return [key, "—"];
+  const mismatch = RELEASE_VERSION.test(version) && RELEASE_VERSION.test(consoleVersion) && version !== consoleVersion;
+  return mismatch ? [key, `${version} (console ${consoleVersion})`, "warn"] : [key, version];
+}
+const softwareRows = computed(() => [
+  ["CONSOLE", consoleVersion],
+  versionRow("HUB", roverStatus.value.device?.version),
+  versionRow("PILOT", roverStatus.value.pilot_version),
+]);
+
 // Rover control/history/GPS are independent from course editing.
 const INSPECTOR_TABS = [
   { key: "rover", label: "Rover", icon: "🚗", roverOnly: true },
@@ -993,6 +1008,7 @@ const receiverGpsRows = computed(() => {
   // Device (network) connection as the first row — same grid style as the GPS rows.
   const rows = [["DEVICE", online ? "ONLINE" : "OFFLINE", online ? "ok" : "bad"]];
   if (!online) return rows;
+  rows.push(versionRow("VERSION", gpsStatus.value?.device?.version));
   if (!r.connected) {
     rows.push(["RECEIVER", "DISCONNECTED", "bad"]);
     return rows;
@@ -6531,6 +6547,13 @@ onUnmounted(() => {
                     </div>
                   </div>
                 </template>
+
+                <div class="inspector-group">
+                  <div class="group-title">Software</div>
+                  <div class="gps-detail">
+                    <span class="popover-row" v-for="r in softwareRows" :key="r[0]"><span class="popover-key">{{ r[0] }}</span><span :class="['popover-val', r[2] && `popover-val-${r[2]}`]">{{ r[1] }}</span></span>
+                  </div>
+                </div>
               </section>
 
               <!-- History tab (missions + logs) -->

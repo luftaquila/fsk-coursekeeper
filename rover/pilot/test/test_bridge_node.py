@@ -533,3 +533,23 @@ def test_server_url_rejected(url):
 
 def test_server_url_allow_http_flag():
     assert server_url_allowed("http://10.0.0.5:10100", allow_http=True) is True
+
+
+def test_stream_announces_protocol_boot_and_version(monkeypatch):
+    import pilot.bridge_node as bridge_mod
+    node = _make_sse_bridge()
+    node.get_parameter = lambda name: types.SimpleNamespace(value='http://127.0.0.1:10100')
+    node._rover_secret = node._internal_secret = ''
+    node._boot_id = 'boot-1'
+    node._version = 'v1.2.3'
+    seen = {}
+
+    def _get(url, **kwargs):
+        seen['url'], seen['params'] = url, kwargs.get('params')
+        raise RuntimeError('stop after the request')
+
+    monkeypatch.setattr(bridge_mod.requests, 'get', _get)
+    with pytest.raises(RuntimeError):
+        node._connect_sse()
+    assert seen['url'] == 'http://127.0.0.1:10100/api/rover/stream'
+    assert seen['params'] == {'protocol_version': 2, 'boot_id': 'boot-1', 'version': 'v1.2.3'}

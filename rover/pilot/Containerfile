@@ -31,6 +31,10 @@ RUN bash -lc '. /opt/ros/jazzy/setup.bash \
 # (see pilot-run's --volume /var/lib/pilot:/var/lib/pilot flag).
 ENV PILOT_STATE_DIR=/var/lib/pilot
 
+# Release version (a tag, edge-<sha>, or dev), reported to the hub by bridge_node.
+ARG VERSION=dev
+ENV COURSEKEEPER_VERSION=${VERSION}
+
 # Opt this container in to `podman auto-update` (driven by the host's
 # podman-auto-update.timer). The host pulls the same tag from ghcr.io
 # and restarts the unit if the digest changed.

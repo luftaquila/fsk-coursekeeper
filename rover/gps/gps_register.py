@@ -78,6 +78,9 @@ from ntrip_caster import NtripCaster  # noqa: E402
 
 log = logging.getLogger("gps-register")
 
+# Release version (a tag, edge-<sha>, or dev); the release build writes it here.
+__version__ = "dev"
+
 # NGII (국토지리정보원) caster — protocol-level constants, mirror gps_node.py.
 NTRIP_HOST = "www.gnssdata.or.kr"
 NTRIP_PORT = 2101
@@ -422,7 +425,8 @@ class GpsRegisterAgent:
         self._baud = baud
         self._meas_rate_ms = meas_rate_ms
         self._status_interval = status_interval
-        self._device = {"id": device_id, "name": device_name or device_id, "kind": "gps"}
+        self._device = {"id": device_id, "name": device_name or device_id, "kind": "gps",
+                        "version": __version__}
         self._caster = caster
         self._events = events
         self._tailscale = tailscale

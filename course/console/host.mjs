@@ -8,6 +8,8 @@ import { inject } from "vue";
 //   features   { publication: boolean } host-only capabilities
 //   publicCourses  { request(path, { signal }) } read-only published course
 //              data for the public viewer (hosts with publication only)
+//   version    optional release version of this console build (vX.Y.Z,
+//              edge-<sha>, or dev), shown next to the device versions
 export const HOST_KEY = Symbol("course-console-host");
 
 export function useHost() {

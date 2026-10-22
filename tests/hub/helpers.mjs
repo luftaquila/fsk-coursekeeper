@@ -198,8 +198,9 @@ export async function startHub(options = {}) {
     operatorUrl,
     device: createClient(deviceUrl),
     operator,
-    async openRover(bootId, { protocolVersion = 2 } = {}) {
-      const query = protocolVersion == null ? "" : `?protocol_version=${protocolVersion}&boot_id=${encodeURIComponent(bootId)}`;
+    async openRover(bootId, { protocolVersion = 2, version } = {}) {
+      let query = protocolVersion == null ? "" : `?protocol_version=${protocolVersion}&boot_id=${encodeURIComponent(bootId)}`;
+      if (version !== undefined) query += `${query ? "&" : "?"}version=${encodeURIComponent(version)}`;
       const stream = track(await openSse(`${deviceUrl}/api/rover/stream${query}`, { readyEvent: "connected" }));
       stream.bootId = bootId;
       return stream;
