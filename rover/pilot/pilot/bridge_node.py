@@ -1,7 +1,7 @@
-"""Bridge Node: SSE/REST bridge between ROS2 and the course server.
+"""Bridge Node: SSE/REST bridge between ROS2 and the rover hub.
 
-Connects to the course server SSE stream to receive commands and
-sends rover position updates via REST.
+Connects to the rover hub's SSE stream (on this Pi, see server_url) to
+receive commands and sends rover position updates via REST.
 
 Published topics:
     /rover/cmd/execute_path (std_msgs/String) - JSON waypoints from server
@@ -29,6 +29,8 @@ import queue
 import threading
 import time
 import uuid
+from urllib.parse import urlsplit
+
 import requests
 import rclpy
 from rclpy.node import Node
@@ -66,6 +68,22 @@ _POSITION_FIX_STATUSES = frozenset({'2d_fix', '3d_fix', 'rtk_float', 'rtk_fixed'
 # the 3s telemetry loop carries the settled value.
 _FIX_PUSH_MIN_INTERVAL_S = 1.0
 
+# Plain http is accepted only to this Pi itself (the rover hub's localhost port).
+_LOOPBACK_HOSTS = frozenset({'127.0.0.1', '::1', 'localhost'})
+
+
+def server_url_allowed(url, allow_http=False):
+    """Whether bridge_node may use `url`: https anywhere, http only to a
+    loopback host unless allow_http. Empty means no server configured."""
+    if not url or url.startswith('https://') or allow_http:
+        return True
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError:
+        return False
+    return parts.scheme == 'http' and host in _LOOPBACK_HOSTS
+
 
 class BridgeNode(Node):
 
@@ -76,22 +94,20 @@ class BridgeNode(Node):
         self.declare_parameter('server_url', '')
         self.declare_parameter('position_report_interval', 1.0)
         self.declare_parameter('sse_reconnect_delay', 3.0)
-        # Emergency escape hatch for Tailscale-internal HTTP use; default off.
+        # Escape hatch for plain http to a non-loopback host; default off.
         self.declare_parameter('server_url_allow_http', False)
 
-        # INTERNAL_SECRET is read from env only — never from ros params, to keep
-        # it off the `ros2 param get` surface for anyone on the same ROS domain.
+        # Optional shared secrets, sent as headers only when set. The rover hub
+        # ignores them (it trusts its localhost peers). Read from env only —
+        # never from ros params, to keep them off the `ros2 param get` surface.
         self._internal_secret = os.environ.get('INTERNAL_SECRET', '')
-        # Rover-scoped secret (preferred when set). The course rover routes accept
-        # X-Rover-Secret, so provisioning ROVER_SECRET lets this device drop the
-        # hub-wide INTERNAL_SECRET. Falls back to INTERNAL_SECRET when unset.
         self._rover_secret = os.environ.get('ROVER_SECRET', '')
 
         url = self.get_parameter('server_url').value
         allow_http = self.get_parameter('server_url_allow_http').value
-        if url and not url.startswith('https://') and not allow_http:
+        if not server_url_allowed(url, allow_http):
             self.get_logger().fatal(
-                f'server_url must start with https:// (got: {url!r}). '
+                f'server_url must be https:// or http:// to a loopback host (got: {url!r}). '
                 "Set server_url_allow_http=true to override for trusted internal networks."
             )
             raise SystemExit(1)
@@ -249,9 +265,9 @@ class BridgeNode(Node):
         self.get_logger().info('Bridge node started')
 
     def _get_headers(self):
-        """Build request headers with rover/internal service auth."""
+        """Build request headers, with the optional secret header when set."""
         headers = {'Content-Type': 'application/json'}
-        # Prefer the rover-scoped secret; fall back to the hub-wide one when unset.
+        # Prefer the rover-scoped secret; fall back to INTERNAL_SECRET when unset.
         if self._rover_secret:
             headers['X-Rover-Secret'] = self._rover_secret
         elif self._internal_secret:
@@ -508,7 +524,7 @@ class BridgeNode(Node):
                 self.get_logger().warn(f'{label} POST error: {e}')
 
     def _on_waypoint_reached(self, msg):
-        """Forward reached waypoint index to the course server."""
+        """Forward reached waypoint index to the rover hub."""
         self._post_async(
             '/api/rover/waypoint_reached',
             {'index': int(msg.data)},
@@ -537,7 +553,7 @@ class BridgeNode(Node):
         })
 
     def _upload_logs(self):
-        """Upload the current log buffer to the course server."""
+        """Upload the current log buffer to the rover hub."""
         url = self.get_parameter('server_url').value
         if not url:
             self._log_upload_in_flight = False
@@ -556,7 +572,7 @@ class BridgeNode(Node):
             self._log_upload_in_flight = False
 
     def _on_spray_result(self, msg):
-        """Forward spray outcome JSON to the course server."""
+        """Forward spray outcome JSON to the rover hub."""
         try:
             payload = json.loads(msg.data)
         except json.JSONDecodeError:
@@ -565,7 +581,7 @@ class BridgeNode(Node):
         self._post_async('/api/rover/spray_result', payload, 'spray_result')
 
     def _on_cal_antenna_result(self, msg):
-        """Forward antenna-cal outcome JSON to the course server."""
+        """Forward antenna-cal outcome JSON to the rover hub."""
         try:
             payload = json.loads(msg.data)
         except json.JSONDecodeError:
@@ -575,7 +591,7 @@ class BridgeNode(Node):
                          'antenna_calibration_result')
 
     def _on_cal_wheels_result(self, msg):
-        """Forward wheel-cal outcome JSON to the course server."""
+        """Forward wheel-cal outcome JSON to the rover hub."""
         try:
             payload = json.loads(msg.data)
         except json.JSONDecodeError:
@@ -610,7 +626,7 @@ class BridgeNode(Node):
         return payload
 
     def _telemetry_loop(self):
-        """Periodically POST telemetry to the course server.
+        """Periodically POST telemetry to the rover hub.
 
         A 3s heartbeat/reconcile: it carries the slow-changing fields (battery,
         gps metrics) and re-affirms state. The discrete, user-visible changes
@@ -686,7 +702,7 @@ class BridgeNode(Node):
             )
 
     def _report_position(self, explicit_request=False):
-        """Enqueue a position POST to the course server.
+        """Enqueue a position POST to the rover hub.
 
         This runs on the single-threaded ROS executor (from the GPS position
         callback), so it must NOT block on the network. The previous

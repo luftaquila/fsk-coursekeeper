@@ -1,8 +1,8 @@
-import crypto from "crypto";
+import crypto from "node:crypto";
+import { CONE_SIDES, validateAltitude, validateCoordinate } from "./validation.mjs";
 
 export const MISSION_PROTOCOL_VERSION = 2;
 export const MISSION_MAX_OCCURRENCES = 1000;
-export const MISSION_MAX_PRESETS_PER_COURSE = 20;
 export const ACTIVE_MISSION_STATES = [
   "ready", "starting", "running", "pausing", "paused", "interrupted", "resuming",
 ];
@@ -18,15 +18,15 @@ const REPORT_EVENTS = new Set([
   "command", "state", "waypoint_active", "waypoint_completed",
   "waypoint_failed", "held", "interrupted", "mission_completed",
 ]);
-function hasColumn(db, table, column) {
-  return db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+const COURSE_NAME_MAX_LENGTH = 100;
+const MAX_OCCURRENCES_LABEL = MISSION_MAX_OCCURRENCES.toLocaleString("en-US");
+
+function httpError(status, message, extra = {}) {
+  return Object.assign(new Error(message), { status, ...extra });
 }
 
-function addColumn(db, table, column, sql) {
-  if (!hasColumn(db, table, column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${sql}`);
-}
-
-function legacyStatus(lifecycleState) {
+// Coarse value of the mission.status column for a lifecycle state.
+function coarseStatus(lifecycleState) {
   if (lifecycleState === "running") return "running";
   if (lifecycleState === "interrupted") return "interrupted";
   if (["ready", "starting", "pausing", "paused", "resuming"].includes(lifecycleState)) return "paused";
@@ -34,317 +34,12 @@ function legacyStatus(lifecycleState) {
   return "stopped";
 }
 
-function legacyLifecycle(status) {
-  if (status === "running") return "interrupted";
-  if (status === "paused" || status === "interrupted") return "interrupted";
-  if (status === "completed") return "completed";
-  return "cancelled";
-}
-
-export function setupMissionV2Schema(db, logger = null) {
-  const changed = [];
-  db.transaction(() => {
-    for (const [column, sql] of [
-      ["created_at", "INTEGER"],
-      ["activated_at", "INTEGER"],
-      ["preset_id", "INTEGER"],
-      ["lifecycle_state", "TEXT"],
-      ["hold_reason", "TEXT"],
-      ["finish_behavior", "TEXT NOT NULL DEFAULT 'stop'"],
-      ["plan_hash", "TEXT"],
-      ["start_lat", "REAL"],
-      ["start_lng", "REAL"],
-      ["start_alt", "REAL"],
-      ["last_rover_boot_id", "TEXT"],
-      ["active_command_id", "TEXT"],
-      ["active_hold_id", "TEXT"],
-      ["empty_plan_mode", "TEXT"],
-      ["protocol_version", "INTEGER NOT NULL DEFAULT 1"],
-    ]) {
-      if (!hasColumn(db, "mission", column)) {
-        addColumn(db, "mission", column, sql);
-        changed.push(`mission.${column}`);
-      }
-    }
-
-    if (changed.includes("mission.finish_behavior")) {
-      // Every legacy navigator always returned to its start; preserve that fact
-      // in history. New missions explicitly default to stopping at the last cone.
-      db.prepare("UPDATE mission SET finish_behavior='return_to_start'").run();
-    }
-
-    db.exec(`CREATE TABLE IF NOT EXISTS mission_route_preset (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      course_id INTEGER NOT NULL,
-      name TEXT NOT NULL COLLATE NOCASE,
-      finish_behavior TEXT NOT NULL CHECK(finish_behavior IN ('stop', 'return_to_start')) DEFAULT 'stop',
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      actor TEXT,
-      FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE CASCADE,
-      UNIQUE (course_id, name)
-    )`);
-    db.exec(`CREATE TABLE IF NOT EXISTS mission_route_preset_item (
-      id TEXT PRIMARY KEY,
-      preset_id INTEGER NOT NULL,
-      position INTEGER NOT NULL,
-      cone_id INTEGER,
-      cone_id_snapshot INTEGER NOT NULL,
-      lat_snapshot REAL NOT NULL,
-      lng_snapshot REAL NOT NULL,
-      alt_snapshot REAL,
-      side_snapshot TEXT,
-      FOREIGN KEY (preset_id) REFERENCES mission_route_preset(id) ON DELETE CASCADE,
-      FOREIGN KEY (cone_id) REFERENCES cone(id) ON DELETE SET NULL,
-      UNIQUE (preset_id, position)
-    )`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_mission_preset_course
-      ON mission_route_preset(course_id, updated_at DESC)`);
-
-    db.exec(`CREATE TABLE IF NOT EXISTS mission_waypoint (
-      id TEXT PRIMARY KEY,
-      mission_id INTEGER NOT NULL,
-      position INTEGER,
-      cone_id INTEGER,
-      cone_id_snapshot INTEGER,
-      lat REAL NOT NULL,
-      lng REAL NOT NULL,
-      alt REAL,
-      side TEXT,
-      state TEXT NOT NULL CHECK(state IN ('pending', 'active', 'completed', 'skipped')) DEFAULT 'pending',
-      outcome TEXT,
-      attempt_count INTEGER NOT NULL DEFAULT 0,
-      completed_at INTEGER,
-      skipped_at INTEGER,
-      skip_reason TEXT,
-      created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL,
-      FOREIGN KEY (mission_id) REFERENCES mission(id) ON DELETE CASCADE,
-      FOREIGN KEY (cone_id) REFERENCES cone(id) ON DELETE SET NULL,
-      UNIQUE (mission_id, position)
-    )`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_mission_waypoint_state
-      ON mission_waypoint(mission_id, state, position)`);
-
-    db.exec(`CREATE TABLE IF NOT EXISTS mission_command (
-      id TEXT PRIMARY KEY,
-      mission_id INTEGER NOT NULL,
-      command_seq INTEGER NOT NULL,
-      action TEXT NOT NULL CHECK(action IN ('start', 'pause', 'resume', 'end')),
-      plan_hash TEXT,
-      state TEXT NOT NULL CHECK(state IN ('pending', 'accepted', 'rejected', 'superseded')) DEFAULT 'pending',
-      requested_at INTEGER NOT NULL,
-      acknowledged_at INTEGER,
-      actor TEXT,
-      rover_boot_id TEXT,
-      reject_reason TEXT,
-      payload_json TEXT NOT NULL,
-      FOREIGN KEY (mission_id) REFERENCES mission(id) ON DELETE CASCADE,
-      UNIQUE (mission_id, command_seq)
-    )`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_mission_command_pending
-      ON mission_command(state, requested_at)`);
-
-    db.exec(`CREATE TABLE IF NOT EXISTS mission_event (
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      mission_id INTEGER NOT NULL,
-      event_type TEXT NOT NULL,
-      t INTEGER NOT NULL,
-      waypoint_id TEXT,
-      command_id TEXT,
-      rover_boot_id TEXT,
-      actor TEXT,
-      before_json TEXT,
-      after_json TEXT,
-      detail_json TEXT,
-      FOREIGN KEY (mission_id) REFERENCES mission(id) ON DELETE CASCADE
-    )`);
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_mission_event_mission
-      ON mission_event(mission_id, t, id)`);
-
-    db.exec(`CREATE TABLE IF NOT EXISTS rover_boot_session (
-      boot_id TEXT PRIMARY KEY,
-      generation INTEGER NOT NULL UNIQUE,
-      first_seen_at INTEGER NOT NULL,
-      last_seen_at INTEGER NOT NULL,
-      last_report_seq INTEGER NOT NULL DEFAULT -1
-        CHECK(last_report_seq BETWEEN -1 AND 9007199254740991)
-    )`);
-    if (!hasColumn(db, "rover_boot_session", "last_report_seq")) {
-      addColumn(db, "rover_boot_session", "last_report_seq",
-        "INTEGER NOT NULL DEFAULT -1 CHECK(last_report_seq BETWEEN -1 AND 9007199254740991)");
-      changed.push("rover_boot_session.last_report_seq");
-    }
-    db.exec(`CREATE INDEX IF NOT EXISTS idx_rover_boot_session_generation
-      ON rover_boot_session(generation DESC)`);
-
-    db.prepare(`UPDATE mission SET
-      created_at = COALESCE(created_at, started_at),
-      lifecycle_state = COALESCE(lifecycle_state,
-        CASE status
-          WHEN 'running' THEN 'interrupted'
-          WHEN 'paused' THEN 'interrupted'
-          WHEN 'interrupted' THEN 'interrupted'
-          WHEN 'completed' THEN 'completed'
-          ELSE 'cancelled'
-        END),
-      finish_behavior = COALESCE(finish_behavior, 'return_to_start'),
-      protocol_version = COALESCE(protocol_version, 1)
-    WHERE created_at IS NULL OR lifecycle_state IS NULL`).run();
-
-    const open = db.prepare(`SELECT id,lifecycle_state,status,hold_reason,
-      active_command_id,active_hold_id FROM mission
-      WHERE lifecycle_state IN (${ACTIVE_MISSION_STATES.map(() => "?").join(",")})
-      ORDER BY id DESC`).all(...ACTIVE_MISSION_STATES);
-    if (open.length > 1) {
-      const now = Date.now();
-      const close = db.prepare(`UPDATE mission SET lifecycle_state='cancelled', status='stopped',
-        hold_reason='migration_superseded',active_command_id=NULL,active_hold_id=NULL,
-        ended_at=COALESCE(ended_at, ?), updated_at=? WHERE id=?`);
-      const selectPendingCommands = db.prepare(`SELECT id,command_seq,action FROM mission_command
-        WHERE mission_id=? AND state='pending' ORDER BY command_seq,id`);
-      const retirePendingCommand = db.prepare(`UPDATE mission_command SET state='superseded',
-        acknowledged_at=?,reject_reason='migration_superseded' WHERE id=? AND state='pending'`);
-      const auditClose = db.prepare(`INSERT INTO mission_event
-        (mission_id,event_type,t,before_json,after_json,detail_json)
-        VALUES (?,?,?,?,?,?)`);
-      const auditCommand = db.prepare(`INSERT INTO mission_event
-        (mission_id,event_type,t,command_id,before_json,after_json,detail_json)
-        VALUES (?,?,?,?,?,?,?)`);
-      for (const row of open.slice(1)) {
-        const pendingCommands = selectPendingCommands.all(row.id);
-        for (const command of pendingCommands) {
-          retirePendingCommand.run(now, command.id);
-          auditCommand.run(
-            row.id, "command.superseded", now, command.id,
-            JSON.stringify({ state: "pending", command_seq: command.command_seq, action: command.action }),
-            JSON.stringify({ state: "superseded" }),
-            JSON.stringify({ reason: "migration_superseded", kept_mission_id: open[0].id }),
-          );
-        }
-        close.run(now, now, row.id);
-        auditClose.run(
-          row.id, "mission.migration_superseded", now,
-          JSON.stringify({
-            state: row.lifecycle_state, status: row.status, hold_reason: row.hold_reason,
-            active_command_id: row.active_command_id, active_hold_id: row.active_hold_id,
-          }),
-          JSON.stringify({
-            state: "cancelled", status: "stopped", hold_reason: "migration_superseded",
-            active_command_id: null, active_hold_id: null,
-          }),
-          JSON.stringify({
-            kept_mission_id: open[0].id,
-            retired_pending_command_ids: pendingCommands.map((command) => command.id),
-          }),
-        );
-      }
-      changed.push({
-        operation: "close_superseded_open_missions",
-        kept_mission_id: open[0].id,
-        closed_mission_ids: open.slice(1).map((row) => row.id),
-      });
-    }
-
-    db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_mission_one_active
-      ON mission((1)) WHERE lifecycle_state IN
-      ('ready','starting','running','pausing','paused','interrupted','resuming')`);
-
-    const legacyMissions = db.prepare(`SELECT id, started_at, ended_at, status,
-      waypoints_json, current_waypoint_idx, spray_results_json
-      FROM mission WHERE NOT EXISTS (
-        SELECT 1 FROM mission_waypoint w WHERE w.mission_id = mission.id
-      ) ORDER BY id`).all();
-    const insertWaypoint = db.prepare(`INSERT INTO mission_waypoint
-      (id, mission_id, position, lat, lng, alt, state, outcome, completed_at, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
-    for (const mission of legacyMissions) {
-      let waypoints = [];
-      let sprays = {};
-      try { waypoints = JSON.parse(mission.waypoints_json || "[]"); } catch { waypoints = []; }
-      try { sprays = JSON.parse(mission.spray_results_json || "{}"); } catch { sprays = {}; }
-      if (!Array.isArray(waypoints)) continue;
-      const reached = Math.max(0, Number(mission.current_waypoint_idx) || 0);
-      for (let i = 0; i < waypoints.length; i += 1) {
-        const wp = waypoints[i];
-        if (!wp || !Number.isFinite(wp.lat) || !Number.isFinite(wp.lng)) continue;
-        const outcome = typeof sprays[i] === "string" ? sprays[i] : null;
-        const completed = mission.status === "completed" || i < reached;
-        insertWaypoint.run(
-          `legacy-${mission.id}-${i}`, mission.id, i, wp.lat, wp.lng,
-          Number.isFinite(wp.alt) ? wp.alt : null,
-          completed ? "completed" : "pending", outcome,
-          completed ? (mission.ended_at || mission.started_at) : null,
-          mission.started_at, mission.ended_at || mission.started_at,
-        );
-      }
-      if (waypoints.length > 0) changed.push(`backfilled mission ${mission.id}`);
-    }
-
-    // An open v1 row must not be exposed through the v2 active-mission API with
-    // a NULL plan hash.  That hybrid cannot use the legacy endpoints (an active
-    // v2-visible mission disables them), while the v2 navigator rejects its
-    // malformed command envelope.  Promote resumable legacy plans completely;
-    // fail closed by cancelling an empty/invalid open plan instead of publishing
-    // an active mission that no rover can execute.
-    const openLegacy = db.prepare(`SELECT id FROM mission
-      WHERE protocol_version=1 AND lifecycle_state IN
-      ('ready','starting','running','pausing','paused','interrupted','resuming')
-      ORDER BY id`).all();
-    const selectLegacyPlan = db.prepare(`SELECT * FROM mission_waypoint
-      WHERE mission_id=? AND state <> 'skipped' ORDER BY position,created_at,id`);
-    const promoteLegacy = db.prepare(`UPDATE mission SET protocol_version=?,plan_hash=?,
-      lifecycle_state='interrupted',status='interrupted',hold_reason='legacy_migrated',
-      active_command_id=NULL,updated_at=? WHERE id=?`);
-    const cancelLegacy = db.prepare(`UPDATE mission SET lifecycle_state='cancelled',status='stopped',
-      hold_reason='legacy_migration_empty_plan',active_command_id=NULL,
-      ended_at=COALESCE(ended_at,?),updated_at=? WHERE id=?`);
-    const insertMigrationEvent = db.prepare(`INSERT INTO mission_event
-      (mission_id,event_type,t,before_json,after_json,detail_json)
-      VALUES (?,?,?,?,?,?)`);
-    for (const mission of openLegacy) {
-      const planRows = selectLegacyPlan.all(mission.id);
-      const pendingCount = planRows.filter((row) => row.state === "pending" || row.state === "active").length;
-      const now = Date.now();
-      if (pendingCount === 0) {
-        cancelLegacy.run(now, now, mission.id);
-        insertMigrationEvent.run(
-          mission.id, "mission.legacy_cancelled", now,
-          JSON.stringify({ protocol_version: 1, state: "interrupted" }),
-          JSON.stringify({ protocol_version: 1, state: "cancelled" }),
-          JSON.stringify({ reason: "empty_remaining_plan" }),
-        );
-        changed.push(`cancelled empty open legacy mission ${mission.id}`);
-        continue;
-      }
-      const planHash = missionPlanHash("return_to_start", planRows);
-      promoteLegacy.run(MISSION_PROTOCOL_VERSION, planHash, now, mission.id);
-      insertMigrationEvent.run(
-        mission.id, "mission.legacy_promoted", now,
-        JSON.stringify({ protocol_version: 1, plan_hash: null }),
-        JSON.stringify({ protocol_version: MISSION_PROTOCOL_VERSION, plan_hash: planHash, state: "interrupted" }),
-        JSON.stringify({ pending_count: pendingCount }),
-      );
-      changed.push(`promoted open legacy mission ${mission.id}`);
-    }
-  })();
-
-  const fkProblems = db.prepare("PRAGMA foreign_key_check").all();
-  if (fkProblems.length > 0) {
-    throw new Error(`mission v2 schema foreign_key_check failed: ${JSON.stringify(fkProblems.slice(0, 5))}`);
-  }
-  if (changed.length > 0 && logger) {
-    logger.log(null, "mission.v2.migrate", { changes: changed }, "rover",
-      { email: "system", name: "migration", role: "admin" });
-  }
-}
-
 function canonicalPlan(finishBehavior, waypoints) {
   return JSON.stringify({
     finish_behavior: finishBehavior,
     waypoints: waypoints.map((w) => ({
       id: w.id,
-      cone_id: w.cone_id_snapshot ?? w.cone_id ?? null,
+      cone_id: w.cone_id ?? null,
       lat: Number(w.lat),
       lng: Number(w.lng),
       alt: Number.isFinite(w.alt) ? Number(w.alt) : null,
@@ -380,31 +75,8 @@ function occurrenceRevision(mission, waypoints) {
   });
 }
 
-function presetRevision(preset, items) {
-  return opaqueRevision({
-    id: preset.id,
-    course_id: preset.course_id,
-    name: preset.name,
-    finish_behavior: preset.finish_behavior,
-    items: items.map((item) => ({
-      id: item.id,
-      position: item.position,
-      cone_id: item.cone_id,
-      cone_id_snapshot: item.cone_id_snapshot,
-      lat_snapshot: item.lat_snapshot,
-      lng_snapshot: item.lng_snapshot,
-      alt_snapshot: item.alt_snapshot,
-      side_snapshot: item.side_snapshot,
-    })),
-  });
-}
-
 function parseJson(value, fallback) {
   try { return JSON.parse(value); } catch { return fallback; }
-}
-
-function actorLabel(req) {
-  return req?.user ? `${req.user.name || ""} <${req.user.email || ""}>` : null;
 }
 
 function publicWaypoint(row) {
@@ -412,7 +84,6 @@ function publicWaypoint(row) {
     id: row.id,
     position: row.position,
     cone_id: row.cone_id,
-    cone_id_snapshot: row.cone_id_snapshot,
     lat: row.lat,
     lng: row.lng,
     alt: row.alt,
@@ -424,6 +95,50 @@ function publicWaypoint(row) {
     skipped_at: row.skipped_at,
     skip_reason: row.skip_reason,
   };
+}
+
+// The course the operator built the mission from. The hub keeps its id and
+// name only; the course itself lives with the browser's course host.
+function validateCourse(course) {
+  if (!course || typeof course !== "object" || Array.isArray(course)) {
+    throw httpError(400, "course must be an object with id and name.", { reason: "invalid_course" });
+  }
+  if (!Number.isSafeInteger(course.id)) {
+    throw httpError(400, "course.id must be an integer.", { reason: "invalid_course" });
+  }
+  const name = typeof course.name === "string" ? course.name.trim() : "";
+  if (!name || name.length > COURSE_NAME_MAX_LENGTH) {
+    throw httpError(400, `course.name must be 1-${COURSE_NAME_MAX_LENGTH} characters.`, { reason: "invalid_course" });
+  }
+  return { id: course.id, name };
+}
+
+function invalidItem(position, message, coneId = null) {
+  return httpError(400, `Waypoint ${position + 1}: ${message}`, {
+    reason: "invalid_item",
+    position,
+    ...(Number.isSafeInteger(coneId) ? { cone_id: coneId } : {}),
+  });
+}
+
+// A route item is authoritative geometry supplied by the browser: the cone it
+// came from (or null for a free point), its position, and its side.
+export function validateMissionItem(item, position) {
+  if (!item || typeof item !== "object" || Array.isArray(item)) {
+    throw invalidItem(position, "Invalid item.");
+  }
+  const coneId = item.cone_id ?? null;
+  if (coneId !== null && !Number.isSafeInteger(coneId)) {
+    throw invalidItem(position, "cone_id must be an integer or null.");
+  }
+  const coordinate = validateCoordinate(item.lat, item.lng);
+  if (!coordinate.valid) throw invalidItem(position, coordinate.error, coneId);
+  const altitude = validateAltitude(item.alt);
+  if (!altitude.valid) throw invalidItem(position, altitude.error, coneId);
+  if (!CONE_SIDES.has(item.side)) {
+    throw invalidItem(position, "side must be left, right, or center.", coneId);
+  }
+  return { cone_id: coneId, lat: item.lat, lng: item.lng, alt: altitude.value, side: item.side };
 }
 
 export function createMissionV2Store(db) {
@@ -458,11 +173,7 @@ export function createMissionV2Store(db) {
   }
 
   function missionRow(id) {
-    return db.prepare(`SELECT m.*, c.name AS course_name, p.name AS preset_name
-      FROM mission m
-      LEFT JOIN course c ON c.id=m.course_id
-      LEFT JOIN mission_route_preset p ON p.id=m.preset_id
-      WHERE m.id=?`).get(id);
+    return db.prepare("SELECT * FROM mission WHERE id=?").get(id);
   }
 
   function motionConfirmedHeld(missionOrId) {
@@ -470,7 +181,7 @@ export function createMissionV2Store(db) {
       ? missionOrId : missionRow(missionOrId);
     if (!row) return false;
     if (row.active_hold_id) return false;
-    const state = row.lifecycle_state || row.status;
+    const state = row.lifecycle_state;
     if (state === "ready" || state === "paused") return true;
     return state === "interrupted"
       && typeof row.hold_reason === "string"
@@ -493,14 +204,13 @@ export function createMissionV2Store(db) {
       course_id: row.course_id,
       course_name: row.course_name,
       preset_id: row.preset_id,
-      preset_name: row.preset_name,
-      created_at: row.created_at || row.started_at,
-      started_at: row.activated_at || row.started_at,
+      created_at: row.created_at,
+      started_at: row.activated_at ?? row.created_at,
       ended_at: row.ended_at,
-      status: row.lifecycle_state || legacyLifecycle(row.status),
+      status: row.lifecycle_state,
       hold_reason: publicHoldReason(row.hold_reason),
       motion_confirmed_held: motionConfirmedHeld(row),
-      finish_behavior: row.finish_behavior || "return_to_start",
+      finish_behavior: row.finish_behavior,
       plan_hash: row.plan_hash,
       start_position: row.start_lat == null ? null : {
         lat: row.start_lat, lng: row.start_lng, alt: row.start_alt,
@@ -576,237 +286,57 @@ export function createMissionV2Store(db) {
     activeMission();
   }
 
-  function resolveConeItems(courseId, items, { requireSnapshots = false } = {}) {
-    if (!Array.isArray(items) || items.length === 0 || items.length > MISSION_MAX_OCCURRENCES) {
-      throw Object.assign(new Error(`콘 경로는 1개 이상 ${MISSION_MAX_OCCURRENCES.toLocaleString()}개 이하여야 합니다.`), { status: 400 });
-    }
-    const course = db.prepare("SELECT id FROM course WHERE id=?").get(courseId);
-    if (!course) throw Object.assign(new Error("코스를 찾을 수 없습니다."), { status: 404 });
-    const cones = new Map(db.prepare("SELECT * FROM cone WHERE course_id=?").all(courseId).map((c) => [c.id, c]));
-    return items.map((item, position) => {
-      const coneId = Number(item?.cone_id ?? item);
-      const cone = cones.get(coneId);
-      if (!Number.isInteger(coneId) || !cone) {
-        throw Object.assign(new Error(`${position + 1}번 항목의 콘이 현재 코스에 없습니다.`), {
-          status: 409, reason: "missing_cone", position, cone_id: coneId,
-        });
-      }
-      if (requireSnapshots) {
-        const hasSnapshot = item && typeof item === "object" && !Array.isArray(item)
-          && Object.hasOwn(item, "lat") && Object.hasOwn(item, "lng")
-          && Object.hasOwn(item, "alt") && Object.hasOwn(item, "side");
-        const expectedAlt = item?.alt == null ? null : Number(item.alt);
-        const currentAlt = cone.alt == null ? null : Number(cone.alt);
-        const snapshotMatches = hasSnapshot
-          && Number.isFinite(item.lat) && Number(item.lat) === Number(cone.lat)
-          && Number.isFinite(item.lng) && Number(item.lng) === Number(cone.lng)
-          && (expectedAlt == null || Number.isFinite(expectedAlt))
-          && expectedAlt === currentAlt
-          && item.side === cone.side;
-        if (!snapshotMatches) {
-          throw Object.assign(new Error(`${position + 1}번 콘이 사전 점검 이후 변경되었습니다. 최신 경로를 다시 확인하세요.`), {
-            status: 409,
-            reason: "cone_snapshot_mismatch",
-            position,
-            cone_id: coneId,
-            current_cone: {
-              cone_id: cone.id,
-              lat: cone.lat,
-              lng: cone.lng,
-              alt: cone.alt,
-              side: cone.side,
-            },
-          });
-        }
-      }
-      return cone;
-    });
-  }
-
-  function listPresets(courseId) {
-    const presets = db.prepare(`SELECT * FROM mission_route_preset WHERE course_id=? ORDER BY name,id`).all(courseId);
-    const selectItems = db.prepare(`SELECT i.*, c.lat AS live_lat, c.lng AS live_lng,
-      c.alt AS live_alt, c.side AS live_side, c.course_id AS live_course_id
-      FROM mission_route_preset_item i LEFT JOIN cone c ON c.id=i.cone_id
-      WHERE i.preset_id=? ORDER BY i.position`);
-    return presets.map((preset) => {
-      let stale = false;
-      const storedItems = selectItems.all(preset.id);
-      const items = storedItems.map((item) => {
-        const isStale = item.cone_id == null || item.live_course_id !== preset.course_id;
-        if (isStale) stale = true;
-        return {
-          id: item.id,
-          position: item.position,
-          cone_id: item.cone_id,
-          cone_id_snapshot: item.cone_id_snapshot,
-          lat: isStale ? item.lat_snapshot : item.live_lat,
-          lng: isStale ? item.lng_snapshot : item.live_lng,
-          alt: isStale ? item.alt_snapshot : item.live_alt,
-          side: isStale ? item.side_snapshot : item.live_side,
-          stale: isStale,
-        };
-      });
-      return {
-        ...preset,
-        preset_revision: presetRevision(preset, storedItems),
-        stale,
-        items,
-      };
-    });
-  }
-
-  function savePreset({
-    id = null, courseId, name, finishBehavior = "stop", items,
-    expectedPresetRevision = null, actor = null,
-  }) {
-    const trimmedName = typeof name === "string" ? name.trim() : "";
-    if (!trimmedName || trimmedName.length > 100) {
-      throw Object.assign(new Error("프리셋 이름은 1~100자여야 합니다."), { status: 400 });
-    }
-    if (!FINISH_BEHAVIORS.has(finishBehavior)) {
-      throw Object.assign(new Error("올바르지 않은 종료 동작입니다."), { status: 400 });
-    }
-    const cones = resolveConeItems(courseId, items, { requireSnapshots: true });
-    const conflictingName = db.prepare(`SELECT id FROM mission_route_preset
-      WHERE course_id=? AND name=? COLLATE NOCASE`).get(courseId, trimmedName);
-    if (conflictingName && conflictingName.id !== id) {
-      throw Object.assign(new Error("같은 이름의 미션 프리셋이 이미 있습니다."), { status: 409, reason: "duplicate_preset_name" });
-    }
-    const now = Date.now();
-    return db.transaction(() => {
-      let presetId = id;
-      let before = null;
-      if (id != null) {
-        const existing = db.prepare("SELECT * FROM mission_route_preset WHERE id=?").get(id);
-        if (!existing) throw Object.assign(new Error("프리셋을 찾을 수 없습니다."), { status: 404 });
-        if (existing.course_id !== courseId) {
-          throw Object.assign(new Error("프리셋의 코스는 변경할 수 없습니다."), { status: 409 });
-        }
-        before = listPresets(courseId).find((p) => p.id === id) || existing;
-        if (typeof expectedPresetRevision !== "string"
-            || expectedPresetRevision !== before.preset_revision) {
-          throw Object.assign(new Error("다른 운영자가 프리셋을 변경했습니다. 최신 프리셋을 다시 불러오세요."), {
-            status: 409,
-            reason: "preset_revision_mismatch",
-            current_preset_revision: before.preset_revision,
-          });
-        }
-        db.prepare(`UPDATE mission_route_preset SET name=?,finish_behavior=?,updated_at=?,actor=? WHERE id=?`)
-          .run(trimmedName, finishBehavior, now, actor, id);
-        db.prepare("DELETE FROM mission_route_preset_item WHERE preset_id=?").run(id);
-      } else {
-        const presetCount = db.prepare("SELECT COUNT(*) AS count FROM mission_route_preset WHERE course_id=?")
-          .get(courseId).count;
-        if (presetCount >= MISSION_MAX_PRESETS_PER_COURSE) {
-          throw Object.assign(new Error(`코스별 미션 프리셋은 ${MISSION_MAX_PRESETS_PER_COURSE}개까지 저장할 수 있습니다.`), {
-            status: 409,
-            reason: "preset_limit",
-          });
-        }
-        const result = db.prepare(`INSERT INTO mission_route_preset
-          (course_id,name,finish_behavior,created_at,updated_at,actor) VALUES (?,?,?,?,?,?)`)
-          .run(courseId, trimmedName, finishBehavior, now, now, actor);
-        presetId = Number(result.lastInsertRowid);
-      }
-      const insert = db.prepare(`INSERT INTO mission_route_preset_item
-        (id,preset_id,position,cone_id,cone_id_snapshot,lat_snapshot,lng_snapshot,alt_snapshot,side_snapshot)
-        VALUES (?,?,?,?,?,?,?,?,?)`);
-      cones.forEach((cone, position) => insert.run(
-        crypto.randomUUID(), presetId, position, cone.id, cone.id,
-        cone.lat, cone.lng, cone.alt, cone.side,
-      ));
-      const after = listPresets(courseId).find((p) => p.id === presetId);
-      return { before, after };
-    })();
-  }
-
-  function deletePreset(id, expectedPresetRevision) {
-    const preset = db.prepare("SELECT * FROM mission_route_preset WHERE id=?").get(id);
-    if (!preset) throw Object.assign(new Error("프리셋을 찾을 수 없습니다."), { status: 404 });
-    const before = listPresets(preset.course_id).find((p) => p.id === id);
-    if (typeof expectedPresetRevision !== "string"
-        || expectedPresetRevision !== before?.preset_revision) {
-      throw Object.assign(new Error("다른 운영자가 프리셋을 변경했습니다. 최신 프리셋을 다시 불러오세요."), {
-        status: 409,
-        reason: "preset_revision_mismatch",
-        current_preset_revision: before?.preset_revision || null,
-      });
-    }
-    return db.transaction(() => {
-      db.prepare("DELETE FROM mission_route_preset WHERE id=?").run(id);
-      return before;
-    })();
-  }
-
   function createMission({
-    courseId,
+    course,
     presetId = null,
-    expectedPresetRevision = null,
     finishBehavior = "stop",
     items,
     actor = null,
   }) {
     if (!FINISH_BEHAVIORS.has(finishBehavior)) {
-      throw Object.assign(new Error("올바르지 않은 종료 동작입니다."), { status: 400 });
+      throw httpError(400, "Invalid finish behavior.");
     }
+    const missionCourse = validateCourse(course);
+    if (presetId != null && !Number.isSafeInteger(presetId)) {
+      throw httpError(400, "preset_id must be an integer.", { reason: "invalid_preset_id" });
+    }
+    if (!Array.isArray(items) || items.length === 0 || items.length > MISSION_MAX_OCCURRENCES) {
+      throw httpError(400, `A mission needs 1 to ${MAX_OCCURRENCES_LABEL} waypoints.`);
+    }
+    const geometry = items.map((item, position) => validateMissionItem(item, position));
     if (activeMission()) {
-      throw Object.assign(new Error("종료되지 않은 미션이 이미 있습니다."), { status: 409, reason: "active_mission" });
+      throw httpError(409, "Another mission is still active.", { reason: "active_mission" });
     }
-    if (presetId != null) {
-      const preset = listPresets(courseId).find((row) => row.id === presetId);
-      if (!preset) throw Object.assign(new Error("해당 코스의 프리셋을 찾을 수 없습니다."), { status: 404 });
-      if (typeof expectedPresetRevision !== "string"
-          || expectedPresetRevision !== preset.preset_revision) {
-        throw Object.assign(new Error("프리셋이 변경되었습니다. 최신 프리셋을 다시 불러오세요."), {
-          status: 409,
-          reason: "preset_revision_mismatch",
-          current_preset_revision: preset.preset_revision,
-        });
-      }
-      if (preset.stale) {
-        throw Object.assign(new Error("삭제된 콘이 포함된 프리셋은 먼저 수정해야 합니다."), {
-          status: 409,
-          reason: "stale_preset",
-        });
-      }
-      const requestedItems = Array.isArray(items) ? items : [];
-      if (finishBehavior !== preset.finish_behavior
-          || preset.items.length !== requestedItems.length
-          || preset.items.some((item, index) => item.cone_id !== Number(requestedItems[index]?.cone_id))) {
-        throw Object.assign(new Error("선택한 프리셋과 실행 경로가 다릅니다. 경로를 다시 확인하세요."), {
-          status: 409,
-          reason: "preset_route_mismatch",
-        });
-      }
-    }
-    const cones = resolveConeItems(courseId, items, { requireSnapshots: true });
     const now = Date.now();
-    const waypoints = cones.map((cone, position) => ({
-      id: crypto.randomUUID(), position, cone_id: cone.id, cone_id_snapshot: cone.id,
-      lat: cone.lat, lng: cone.lng, alt: cone.alt, side: cone.side,
-    }));
+    const waypoints = geometry.map((item, position) => ({ id: crypto.randomUUID(), position, ...item }));
     const planHash = missionPlanHash(finishBehavior, waypoints);
     const missionId = db.transaction(() => {
       const result = db.prepare(`INSERT INTO mission
-        (course_id,preset_id,started_at,status,waypoints_json,current_waypoint_idx,
-         spray_results_json,updated_at,actor,created_at,lifecycle_state,finish_behavior,
-         plan_hash,protocol_version)
-        VALUES (?,?,?,'paused',?,0,'{}',?,?,?,?,?,?,?)`)
+        (course_id,course_name,preset_id,created_at,updated_at,lifecycle_state,status,
+         finish_behavior,plan_hash,protocol_version,actor)
+        VALUES (?,?,?,?,?,'ready',?,?,?,?,?)`)
         .run(
-          courseId, presetId, now,
-          JSON.stringify(waypoints.map(({ lat, lng, alt }) => ({ lat, lng, alt }))),
-          now, actor, now, "ready", finishBehavior, planHash, MISSION_PROTOCOL_VERSION,
+          missionCourse.id, missionCourse.name, presetId ?? null, now, now, coarseStatus("ready"),
+          finishBehavior, planHash, MISSION_PROTOCOL_VERSION, actor,
         );
       const id = Number(result.lastInsertRowid);
       const insert = db.prepare(`INSERT INTO mission_waypoint
-        (id,mission_id,position,cone_id,cone_id_snapshot,lat,lng,alt,side,state,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)`);
+        (id,mission_id,position,cone_id,lat,lng,alt,side,state,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`);
       for (const wp of waypoints) insert.run(
-        wp.id, id, wp.position, wp.cone_id, wp.cone_id_snapshot,
-        wp.lat, wp.lng, wp.alt, wp.side, now, now,
+        wp.id, id, wp.position, wp.cone_id, wp.lat, wp.lng, wp.alt, wp.side, now, now,
       );
-      recordEvent(id, "mission.created", { actor, after: { course_id: courseId, preset_id: presetId, finish_behavior: finishBehavior, plan_hash: planHash, waypoint_count: waypoints.length } });
+      recordEvent(id, "mission.created", {
+        actor,
+        after: {
+          course_id: missionCourse.id,
+          course_name: missionCourse.name,
+          preset_id: presetId ?? null,
+          finish_behavior: finishBehavior,
+          plan_hash: planHash,
+          waypoint_count: waypoints.length,
+        },
+      });
       return id;
     })();
     return missionPublic(missionId);
@@ -817,83 +347,55 @@ export function createMissionV2Store(db) {
     finishBehavior, items, actor = null,
   }) {
     const mission = missionRow(missionId);
-    if (!mission) throw Object.assign(new Error("미션을 찾을 수 없습니다."), { status: 404 });
+    if (!mission) throw httpError(404, "Mission not found.");
     if (!motionConfirmedHeld(mission)) {
-      throw Object.assign(new Error("로버가 정지 상태를 확인한 미션에서만 남은 경로를 편집할 수 있습니다."), {
-        status: 409, reason: "motion_not_confirmed_held",
+      throw httpError(409, "The remaining route can be edited only after the rover confirms it is stopped.", {
+        reason: "motion_not_confirmed_held",
       });
     }
     if (mission.active_command_id) {
-      throw Object.assign(new Error("처리 중인 로버 명령이 있습니다."), { status: 409 });
+      throw httpError(409, "A rover command is still pending.");
     }
     const before = missionPublic(missionId);
     if (typeof expectedOccurrenceRevision !== "string"
         || expectedOccurrenceRevision !== before.occurrence_revision) {
-      throw Object.assign(new Error("미션 진행 상태가 변경되었습니다. 최신 미션을 다시 불러오세요."), {
-        status: 409,
+      throw httpError(409, "The mission progress changed. Reload the latest mission.", {
         reason: "occurrence_revision_mismatch",
         current_occurrence_revision: before.occurrence_revision,
       });
     }
     if (expectedPlanHash !== mission.plan_hash) {
-      throw Object.assign(new Error("다른 운영자가 경로를 변경했습니다. 최신 미션을 다시 불러오세요."), {
-        status: 409, reason: "plan_hash_mismatch", current_plan_hash: mission.plan_hash,
+      throw httpError(409, "Another operator changed the route. Reload the latest mission.", {
+        reason: "plan_hash_mismatch", current_plan_hash: mission.plan_hash,
       });
     }
     const nextFinish = finishBehavior ?? mission.finish_behavior;
     if (!FINISH_BEHAVIORS.has(nextFinish)) {
-      throw Object.assign(new Error("올바르지 않은 종료 동작입니다."), { status: 400 });
+      throw httpError(400, "Invalid finish behavior.");
     }
     if (!Array.isArray(items) || items.length > MISSION_MAX_OCCURRENCES) {
-      throw Object.assign(new Error("남은 경로 형식이 올바르지 않습니다."), { status: 400 });
+      throw httpError(400, "Invalid remaining route.");
     }
     const currentPending = pendingWaypoints(missionId);
     const pendingById = new Map(currentPending.map((w) => [w.id, w]));
     const used = new Set();
-    const newConeEntries = items
-      .map((item, position) => ({ item, position }))
-      .filter(({ item }) => !item?.waypoint_id);
-    let newCones = [];
-    if (newConeEntries.length > 0) {
-      try {
-        newCones = resolveConeItems(
-          mission.course_id,
-          newConeEntries.map(({ item }) => item),
-          { requireSnapshots: true },
-        );
-      } catch (error) {
-        if (Number.isInteger(error?.position) && newConeEntries[error.position]) {
-          error.position = newConeEntries[error.position].position;
-          if (error.reason === "cone_snapshot_mismatch") {
-            error.message = `${error.position + 1}번 콘이 사전 점검 이후 변경되었습니다. 최신 경로를 다시 확인하세요.`;
-          } else if (error.reason === "missing_cone") {
-            error.message = `${error.position + 1}번 항목의 콘이 현재 코스에 없습니다.`;
-          }
-        }
-        throw error;
-      }
-    }
-    let newConeIndex = 0;
     const nextPending = items.map((item, position) => {
       if (item?.waypoint_id) {
         const existing = pendingById.get(item.waypoint_id);
         if (!existing || used.has(existing.id)) {
-          throw Object.assign(new Error(`${position + 1}번 남은 웨이포인트가 유효하지 않습니다.`), { status: 409 });
+          throw httpError(409, `Remaining waypoint ${position + 1} is not a pending waypoint of this mission.`);
         }
         used.add(existing.id);
         return existing;
       }
-      const cone = newCones[newConeIndex++];
       return {
-        id: crypto.randomUUID(), mission_id: missionId, cone_id: cone.id,
-        cone_id_snapshot: cone.id, lat: cone.lat, lng: cone.lng, alt: cone.alt,
-        side: cone.side, state: "pending", attempt_count: 0,
+        id: crypto.randomUUID(), mission_id: missionId, ...validateMissionItem(item, position),
+        state: "pending", attempt_count: 0,
       };
     });
     const completedCount = before.waypoints.filter((waypoint) => waypoint.state === "completed").length;
     if (completedCount + nextPending.length > MISSION_MAX_OCCURRENCES) {
-      throw Object.assign(new Error(`완료 항목과 남은 경로를 합쳐 ${MISSION_MAX_OCCURRENCES.toLocaleString()}개를 넘을 수 없습니다.`), {
-        status: 409,
+      throw httpError(409, `Completed and remaining waypoints cannot exceed ${MAX_OCCURRENCES_LABEL} in total.`, {
         reason: "mission_occurrence_limit",
       });
     }
@@ -904,16 +406,16 @@ export function createMissionV2Store(db) {
           row.outcome === "dispense_outcome_uncertain" && !used.has(row.id));
       if (nextFinish === "return_to_start") {
         if (!Number.isFinite(mission.start_lat) || !Number.isFinite(mission.start_lng)) {
-          throw Object.assign(new Error("영구 저장된 미션 시작점이 없어 복귀 전용 경로로 변경할 수 없습니다."), {
-            status: 409, reason: "return_start_unavailable",
+          throw httpError(409, "No recorded mission start point, so the route cannot become return-only.", {
+            reason: "return_start_unavailable",
           });
         }
         emptyPlanMode = "return_only";
       }
       else if (removedOnlyUncertain) emptyPlanMode = "uncertainty_resolved";
       else {
-        throw Object.assign(new Error("일반 일시정지 미션의 남은 경로는 비워 둘 수 없습니다."), {
-          status: 409, reason: "empty_remaining_plan",
+        throw httpError(409, "The remaining route of a paused mission cannot be empty.", {
+          reason: "empty_remaining_plan",
         });
       }
     }
@@ -933,12 +435,12 @@ export function createMissionV2Store(db) {
         WHERE mission_id=? AND state='completed'`).get(missionId).p;
       const update = db.prepare(`UPDATE mission_waypoint SET position=?,state='pending',updated_at=? WHERE id=? AND mission_id=?`);
       const insert = db.prepare(`INSERT INTO mission_waypoint
-        (id,mission_id,position,cone_id,cone_id_snapshot,lat,lng,alt,side,state,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,'pending',?,?)`);
+        (id,mission_id,position,cone_id,lat,lng,alt,side,state,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,'pending',?,?)`);
       nextPending.forEach((row, index) => {
         const position = completedMax + 1 + index;
         if (pendingById.has(row.id)) update.run(position, now, row.id, missionId);
-        else insert.run(row.id, missionId, position, row.cone_id, row.cone_id_snapshot, row.lat, row.lng, row.alt, row.side, now, now);
+        else insert.run(row.id, missionId, position, row.cone_id, row.lat, row.lng, row.alt, row.side, now, now);
       });
       const planRows = db.prepare(`SELECT * FROM mission_waypoint WHERE mission_id=? AND state <> 'skipped'
         ORDER BY position,created_at,id`).all(missionId);
@@ -967,13 +469,12 @@ export function createMissionV2Store(db) {
     missionId, action, expectedPlanHash = null, expectedOccurrenceRevision = null, actor = null,
     force = false, targetBootId = null,
   }) {
-    if (!COMMAND_ACTIONS.has(action)) throw Object.assign(new Error("올바르지 않은 미션 명령입니다."), { status: 400 });
+    if (!COMMAND_ACTIONS.has(action)) throw httpError(400, "Invalid mission command.");
     const mission = missionRow(missionId);
-    if (!mission) throw Object.assign(new Error("미션을 찾을 수 없습니다."), { status: 404 });
+    if (!mission) throw httpError(404, "Mission not found.");
     if ((action === "start" || action === "resume")
         && (typeof expectedPlanHash !== "string" || expectedPlanHash !== mission.plan_hash)) {
-      throw Object.assign(new Error("미션 경로가 변경되었습니다. 최신 미션으로 다시 시도하세요."), {
-        status: 409,
+      throw httpError(409, "The mission route changed. Retry with the latest mission.", {
         reason: "plan_hash_mismatch",
         current_plan_hash: mission.plan_hash,
       });
@@ -989,15 +490,14 @@ export function createMissionV2Store(db) {
           if (replayRevisionMatches) {
             return { command: pending, mission: missionPublic(missionId), replay: true };
           }
-          throw Object.assign(new Error("미션 진행 상태가 변경되었습니다. 최신 미션을 다시 불러오세요."), {
-            status: 409,
+          throw httpError(409, "The mission progress changed. Reload the latest mission.", {
             reason: "occurrence_revision_mismatch",
             current_occurrence_revision: missionPublic(missionId).occurrence_revision,
           });
         }
         if (action !== "end") {
-          throw Object.assign(new Error(`${pending.action} 명령이 처리 중입니다.`), {
-            status: 409, reason: "command_in_progress", pending_action: pending.action,
+          throw httpError(409, `A ${pending.action} command is still pending.`, {
+            reason: "command_in_progress", pending_action: pending.action,
           });
         }
         pendingToSupersede = pending;
@@ -1007,41 +507,40 @@ export function createMissionV2Store(db) {
       const currentOccurrenceRevision = missionPublic(missionId).occurrence_revision;
       if (typeof expectedOccurrenceRevision !== "string"
           || expectedOccurrenceRevision !== currentOccurrenceRevision) {
-        throw Object.assign(new Error("미션 진행 상태가 변경되었습니다. 최신 미션을 다시 불러오세요."), {
-          status: 409,
+        throw httpError(409, "The mission progress changed. Reload the latest mission.", {
           reason: "occurrence_revision_mismatch",
           current_occurrence_revision: currentOccurrenceRevision,
         });
       }
     }
     if (mission.active_hold_id && action !== "end") {
-      throw Object.assign(new Error("재부팅 안전 정지가 아직 로버에서 확인되지 않았습니다."), {
-        status: 409, reason: "safety_hold_pending",
+      throw httpError(409, "The rover has not confirmed the reboot safety hold yet.", {
+        reason: "safety_hold_pending",
       });
     }
     if (TERMINAL_MISSION_STATES.has(mission.lifecycle_state)) {
-      throw Object.assign(new Error("이미 종료된 미션입니다."), { status: 409 });
+      throw httpError(409, "The mission has already ended.");
     }
     if (action === "resume" && !motionConfirmedHeld(mission)) {
-      throw Object.assign(new Error("로버의 정지가 확인된 미션만 재개할 수 없습니다."), {
-        status: 409, reason: "motion_not_confirmed_held",
+      throw httpError(409, "Only a mission the rover confirmed as stopped can be resumed.", {
+        reason: "motion_not_confirmed_held",
       });
     }
     const allowed = action === "start" ? mission.lifecycle_state === "ready"
       : action === "resume" ? ["paused", "interrupted"].includes(mission.lifecycle_state)
         : action === "pause" ? mission.lifecycle_state === "running"
           : true;
-    if (!allowed) throw Object.assign(new Error(`현재 미션 상태(${mission.lifecycle_state})에서 ${action}할 수 없습니다.`), { status: 409 });
+    if (!allowed) throw httpError(409, `Cannot ${action} a mission that is ${mission.lifecycle_state}.`);
     const pending = pendingWaypoints(missionId).map(publicWaypoint);
     if ((action === "start" || action === "resume") && pending.length === 0
         && !["return_only", "uncertainty_resolved"].includes(mission.empty_plan_mode)) {
-      throw Object.assign(new Error("실행할 남은 웨이포인트가 없습니다."), { status: 409 });
+      throw httpError(409, "No remaining waypoints to run.");
     }
     if ((action === "start" || action === "resume")
         && pending.length === 0 && mission.empty_plan_mode === "return_only"
         && (!Number.isFinite(mission.start_lat) || !Number.isFinite(mission.start_lng))) {
-      throw Object.assign(new Error("영구 저장된 미션 시작점이 없어 복귀 전용 경로를 실행할 수 없습니다."), {
-        status: 409, reason: "return_start_unavailable",
+      throw httpError(409, "No recorded mission start point, so the return-only route cannot run.", {
+        reason: "return_start_unavailable",
       });
     }
     const now = Date.now();
@@ -1091,7 +590,7 @@ export function createMissionV2Store(db) {
           WHERE id=?`).run(now, commandId, missionId);
       } else {
         db.prepare(`UPDATE mission SET lifecycle_state=?,status=?,updated_at=?,active_command_id=?,hold_reason=NULL WHERE id=?`)
-          .run(nextState, legacyStatus(nextState), now, commandId, missionId);
+          .run(nextState, coarseStatus(nextState), now, commandId, missionId);
       }
       recordEvent(missionId, `command.${action}.requested`, {
         commandId, actor, before: { state: mission.lifecycle_state },
@@ -1105,36 +604,36 @@ export function createMissionV2Store(db) {
   function applyReport(report, actor = "rover") {
     const missionId = Number(report.mission_id);
     if (!REPORT_EVENTS.has(report.event)) {
-      throw Object.assign(new Error("올바르지 않은 미션 보고 이벤트입니다."), { status: 400, reason: "unknown_report_event" });
+      throw httpError(400, "Unknown mission report event.", { reason: "unknown_report_event" });
     }
     if (report.event === "command"
         && (typeof report.command_id !== "string"
           || !Number.isInteger(report.command_seq)
           || !["accepted", "rejected"].includes(report.command_result)
           || !["running", "held"].includes(report.motion_state))) {
-      throw Object.assign(new Error("미션 명령 응답의 상관관계 정보가 올바르지 않습니다."), { status: 400, reason: "invalid_command_report" });
+      throw httpError(400, "The command report is missing its correlation fields.", { reason: "invalid_command_report" });
     }
     if (report.event === "state" && !["running", "held"].includes(report.motion_state)) {
-      throw Object.assign(new Error("올바르지 않은 로버 미션 상태입니다."), { status: 400, reason: "invalid_motion_state" });
+      throw httpError(400, "Invalid rover motion state.", { reason: "invalid_motion_state" });
     }
     if (["waypoint_active", "waypoint_completed", "waypoint_failed"].includes(report.event)
         && (typeof report.waypoint_id !== "string" || !report.waypoint_id)) {
-      throw Object.assign(new Error("웨이포인트 보고에 ID가 없습니다."), { status: 400, reason: "missing_waypoint_id" });
+      throw httpError(400, "The waypoint report has no waypoint ID.", { reason: "missing_waypoint_id" });
     }
     if (report.completed_waypoint_ids !== undefined
         && (!Array.isArray(report.completed_waypoint_ids)
           || report.completed_waypoint_ids.some((id) => typeof id !== "string" || !id))) {
-      throw Object.assign(new Error("완료 웨이포인트 체크포인트 형식이 올바르지 않습니다."), {
-        status: 400, reason: "invalid_completed_waypoint_ids",
+      throw httpError(400, "Invalid completed waypoint checkpoint.", {
+        reason: "invalid_completed_waypoint_ids",
       });
     }
     const mission = missionRow(missionId);
-    if (!mission) throw Object.assign(new Error("보고된 미션을 찾을 수 없습니다."), { status: 404, reason: "unknown_mission" });
+    if (!mission) throw httpError(404, "The reported mission does not exist.", { reason: "unknown_mission" });
     if (report.plan_hash !== mission.plan_hash) {
-      throw Object.assign(new Error("로버 계획 해시가 서버와 다릅니다."), { status: 409, reason: "plan_hash_mismatch" });
+      throw httpError(409, "The rover plan hash does not match the hub.", { reason: "plan_hash_mismatch" });
     }
     if (TERMINAL_MISSION_STATES.has(mission.lifecycle_state) && report.event !== "command") {
-      throw Object.assign(new Error("이미 종료된 미션의 상태는 변경할 수 없습니다."), { status: 409, reason: "terminal_mission" });
+      throw httpError(409, "An ended mission cannot change state.", { reason: "terminal_mission" });
     }
     const now = Date.now();
     return db.transaction(() => {
@@ -1145,20 +644,20 @@ export function createMissionV2Store(db) {
         && activeCommandAtReport.action === "end" ? activeCommandAtReport : null;
       if (mission.active_hold_id && ["held", "interrupted"].includes(report.event)) {
         if (report.hold_id !== mission.active_hold_id) {
-          throw Object.assign(new Error("재부팅 안전 정지 ID가 현재 요청과 일치하지 않습니다."), {
-            status: 409, reason: "hold_id_mismatch",
+          throw httpError(409, "The safety hold ID does not match the current hold.", {
+            reason: "hold_id_mismatch",
           });
         }
         if (report.checkpoint_persisted !== true) {
-          throw Object.assign(new Error("로버의 정지 체크포인트가 아직 영구 저장되지 않았습니다."), {
-            status: 409, reason: "checkpoint_not_persisted",
+          throw httpError(409, "The rover has not persisted its hold checkpoint yet.", {
+            reason: "checkpoint_not_persisted",
           });
         }
       }
       if (mission.active_hold_id
           && ["waypoint_active", "waypoint_failed", "mission_completed"].includes(report.event)) {
-        throw Object.assign(new Error("재부팅 안전 정지가 확인되기 전에는 해당 보고로 미션 상태를 변경할 수 없습니다."), {
-          status: 409, reason: "safety_hold_pending",
+        throw httpError(409, "This report cannot change the mission until the safety hold is confirmed.", {
+          reason: "safety_hold_pending",
         });
       }
       const completedIds = Array.isArray(report.completed_waypoint_ids)
@@ -1170,13 +669,13 @@ export function createMissionV2Store(db) {
         for (const waypointId of completedIds) {
           const wp = selectWaypoint.get(waypointId, missionId);
           if (!wp) {
-            throw Object.assign(new Error("체크포인트에 현재 미션 소속이 아닌 웨이포인트가 있습니다."), {
-              status: 409, reason: "unknown_completed_waypoint",
+            throw httpError(409, "The checkpoint lists a waypoint outside this mission.", {
+              reason: "unknown_completed_waypoint",
             });
           }
           if (wp.state === "skipped") {
-            throw Object.assign(new Error("건너뛴 웨이포인트를 완료 체크포인트로 처리할 수 없습니다."), {
-              status: 409, reason: "skipped_completed_waypoint",
+            throw httpError(409, "A skipped waypoint cannot be checkpointed as completed.", {
+              reason: "skipped_completed_waypoint",
             });
           }
           if (report.event === "waypoint_completed" && waypointId === report.waypoint_id) continue;
@@ -1190,21 +689,21 @@ export function createMissionV2Store(db) {
       let command = null;
       if (report.command_id) command = db.prepare("SELECT * FROM mission_command WHERE id=? AND mission_id=?").get(report.command_id, missionId);
       if (report.command_id && !command) {
-        throw Object.assign(new Error("알 수 없는 명령 ID입니다."), { status: 409, reason: "unknown_command" });
+        throw httpError(409, "Unknown command ID.", { reason: "unknown_command" });
       }
       if (command && report.event === "command" && report.command_seq !== command.command_seq) {
-        throw Object.assign(new Error("명령 순번이 요청과 일치하지 않습니다."), { status: 409, reason: "command_seq_mismatch" });
+        throw httpError(409, "The command sequence does not match the request.", { reason: "command_seq_mismatch" });
       }
       if (command && report.event === "command" && command.action === "end"
           && report.command_result === "accepted" && report.motion_state !== "held") {
-        throw Object.assign(new Error("로버의 정지가 확인되기 전에는 미션을 종료할 수 없습니다."), {
-          status: 409, reason: "end_motion_not_held",
+        throw httpError(409, "The mission cannot end before the rover confirms it is stopped.", {
+          reason: "end_motion_not_held",
         });
       }
       if (command && report.event === "command" && command.action === "pause"
           && report.command_result === "accepted" && report.motion_state !== "held") {
-        throw Object.assign(new Error("로버의 정지가 확인되기 전에는 일시정지를 확정할 수 없습니다."), {
-          status: 409, reason: "pause_motion_not_held",
+        throw httpError(409, "The pause cannot complete before the rover confirms it is stopped.", {
+          reason: "pause_motion_not_held",
         });
       }
       if (command && report.event === "command" && command.state === "superseded") {
@@ -1218,12 +717,12 @@ export function createMissionV2Store(db) {
       }
       if (command && report.event === "command" && command.state !== "pending"
           && command.state !== report.command_result) {
-        throw Object.assign(new Error("이미 확정된 명령 결과와 상충합니다."), { status: 409, reason: "command_result_conflict" });
+        throw httpError(409, "The result conflicts with the recorded command result.", { reason: "command_result_conflict" });
       }
       if (command && report.command_result && command.state === "pending") {
         const accepted = report.command_result === "accepted";
         if (!accepted && report.command_result !== "rejected") {
-          throw Object.assign(new Error("올바르지 않은 명령 결과입니다."), { status: 400 });
+          throw httpError(400, "Invalid command result.");
         }
         db.prepare(`UPDATE mission_command SET state=?,acknowledged_at=?,rover_boot_id=?,reject_reason=? WHERE id=?`)
           .run(accepted ? "accepted" : "rejected", now, report.boot_id, accepted ? null : (report.reason || "rejected"), command.id);
@@ -1237,19 +736,19 @@ export function createMissionV2Store(db) {
           return missionPublic(missionId);
         }
         let nextState = mission.lifecycle_state;
-        let nextLegacy = mission.status;
+        let nextStatus = mission.status;
         let endedAt = mission.ended_at;
         if (accepted) {
           if (command.action === "start" || command.action === "resume") {
             nextState = report.motion_state === "running"
               ? "running" : (command.action === "start" ? "ready" : "paused");
-            nextLegacy = legacyStatus(nextState);
+            nextStatus = coarseStatus(nextState);
           } else if (command.action === "pause") {
             nextState = report.motion_state === "held" ? "paused" : mission.lifecycle_state;
-            nextLegacy = legacyStatus(nextState);
+            nextStatus = coarseStatus(nextState);
           } else if (command.action === "end") {
             nextState = "cancelled";
-            nextLegacy = "stopped";
+            nextStatus = "stopped";
             endedAt = endedAt || now;
           }
         } else {
@@ -1258,18 +757,18 @@ export function createMissionV2Store(db) {
           nextState = report.motion_state === "held"
             ? (previousState === "ready" ? "ready" : "paused")
             : (previousState === "running" ? "running" : "interrupted");
-          nextLegacy = legacyStatus(nextState);
+          nextStatus = coarseStatus(nextState);
         }
         const preserveSafetyHold = mission.active_hold_id != null && nextState !== "cancelled";
         if (preserveSafetyHold) {
           nextState = "interrupted";
-          nextLegacy = "interrupted";
+          nextStatus = "interrupted";
           endedAt = mission.ended_at;
         }
         db.prepare(`UPDATE mission SET lifecycle_state=?,status=?,updated_at=?,ended_at=?,
           active_command_id=NULL,last_rover_boot_id=?,activated_at=CASE WHEN ?='running' THEN COALESCE(activated_at,?) ELSE activated_at END,
           hold_reason=?,active_hold_id=CASE WHEN ? IN ('running','cancelled') THEN NULL ELSE active_hold_id END WHERE id=?`)
-          .run(nextState, nextLegacy, now, endedAt, report.boot_id, nextState, now,
+          .run(nextState, nextStatus, now, endedAt, report.boot_id, nextState, now,
             preserveSafetyHold
               ? "rover_rebooted"
               : nextState === "running" || nextState === "cancelled"
@@ -1347,7 +846,7 @@ export function createMissionV2Store(db) {
                 last_rover_boot_id=?,active_command_id=NULL,
                 active_hold_id=CASE WHEN ?='cancelled' THEN NULL ELSE active_hold_id END WHERE id=?`)
                 .run(
-                  reconciledState, legacyStatus(reconciledState),
+                  reconciledState, coarseStatus(reconciledState),
                   acceptedEnd ? null : (report.last_command_reason || report.reason || "checkpoint_restored"),
                   now, reconciledState, now, report.boot_id, reconciledState, missionId,
                 );
@@ -1366,7 +865,7 @@ export function createMissionV2Store(db) {
                   .run(now, mission.active_command_id);
               }
             } else {
-              // A state request is sent before pending-command replay on server
+              // A state request is sent before pending-command replay on hub
               // recovery. A held checkpoint whose durable command sequence is
               // older than (or equal to) that pending command is pre-command
               // evidence, not authority to retire the command that follows it.
@@ -1409,7 +908,7 @@ export function createMissionV2Store(db) {
       if (report.event === "waypoint_active" && report.waypoint_id) {
         const wp = db.prepare("SELECT * FROM mission_waypoint WHERE id=? AND mission_id=?").get(report.waypoint_id, missionId);
         if (!wp || !["pending", "active"].includes(wp.state)) {
-          throw Object.assign(new Error("활성 웨이포인트가 현재 미션의 미완료 항목이 아닙니다."), { status: 409 });
+          throw httpError(409, "The active waypoint is not a pending waypoint of this mission.");
         }
         db.prepare(`UPDATE mission_waypoint SET state='active',attempt_count=attempt_count+CASE WHEN state='pending' THEN 1 ELSE 0 END,
           updated_at=? WHERE id=?`).run(now, wp.id);
@@ -1418,20 +917,20 @@ export function createMissionV2Store(db) {
       if (report.event === "waypoint_completed" && report.waypoint_id) {
         const wp = db.prepare("SELECT * FROM mission_waypoint WHERE id=? AND mission_id=?").get(report.waypoint_id, missionId);
         if (!wp) {
-          throw Object.assign(new Error("완료 웨이포인트가 현재 미션의 미완료 항목이 아닙니다."), { status: 409 });
+          throw httpError(409, "The completed waypoint does not belong to this mission.");
         }
         if (["pending", "active"].includes(wp.state)) {
           db.prepare(`UPDATE mission_waypoint SET state='completed',outcome='success',completed_at=?,updated_at=? WHERE id=?`)
             .run(now, now, wp.id);
           recordEvent(missionId, "waypoint.completed", { waypointId: wp.id, roverBootId: report.boot_id, actor, before: publicWaypoint(wp), after: { state: "completed", outcome: "success" } });
         } else if (wp.state !== "completed") {
-          throw Object.assign(new Error("건너뛴 웨이포인트는 완료 처리할 수 없습니다."), { status: 409 });
+          throw httpError(409, "A skipped waypoint cannot be completed.");
         }
       }
       if (report.event === "waypoint_failed" && report.waypoint_id) {
         const wp = db.prepare("SELECT * FROM mission_waypoint WHERE id=? AND mission_id=?").get(report.waypoint_id, missionId);
         if (!wp || !["pending", "active"].includes(wp.state)) {
-          throw Object.assign(new Error("실패 웨이포인트가 현재 미션의 미완료 항목이 아닙니다."), { status: 409 });
+          throw httpError(409, "The failed waypoint is not a pending waypoint of this mission.");
         }
         db.prepare(`UPDATE mission_waypoint SET state='pending',outcome=?,updated_at=? WHERE id=?`)
           .run(report.outcome || "failed", now, wp.id);
@@ -1447,8 +946,8 @@ export function createMissionV2Store(db) {
         const wp = db.prepare("SELECT * FROM mission_waypoint WHERE id=? AND mission_id=?")
           .get(report.active_waypoint_id, missionId);
         if (!wp || !["pending", "active"].includes(wp.state)) {
-          throw Object.assign(new Error("분사 결과가 불확실한 웨이포인트가 현재 미션의 미완료 항목이 아닙니다."), {
-            status: 409, reason: "invalid_uncertain_waypoint",
+          throw httpError(409, "The waypoint with an uncertain dispense is not a pending waypoint of this mission.", {
+            reason: "invalid_uncertain_waypoint",
           });
         }
         db.prepare(`UPDATE mission_waypoint SET state='pending',outcome='dispense_outcome_uncertain',updated_at=?
@@ -1521,7 +1020,9 @@ export function createMissionV2Store(db) {
       if (report.event === "mission_completed") {
         const remaining = db.prepare(`SELECT COUNT(*) AS n FROM mission_waypoint WHERE mission_id=? AND state IN ('pending','active')`).get(missionId).n;
         if (remaining > 0) {
-          throw Object.assign(new Error(`미완료 웨이포인트 ${remaining}개가 있어 미션을 완료할 수 없습니다.`), { status: 409, reason: "pending_waypoints" });
+          throw httpError(409, `Cannot complete the mission with ${remaining} waypoint(s) still pending.`, {
+            reason: "pending_waypoints",
+          });
         }
         if (mission.active_command_id) {
           const retired = db.prepare(`UPDATE mission_command SET state='superseded',acknowledged_at=?,
@@ -1662,9 +1163,7 @@ export function createMissionV2Store(db) {
     if (typeof bootId !== "string" || !bootId || bootId.length > 128
         || !Number.isSafeInteger(reportSeq) || reportSeq < 0
         || typeof apply !== "function") {
-      throw Object.assign(new Error("올바르지 않은 로버 보고 순번입니다."), {
-        status: 400, reason: "invalid_report_sequence",
-      });
+      throw httpError(400, "Invalid rover report sequence.", { reason: "invalid_report_sequence" });
     }
     const now = Date.now();
     try {
@@ -1674,8 +1173,8 @@ export function createMissionV2Store(db) {
         ).get().generation;
         const session = db.prepare("SELECT * FROM rover_boot_session WHERE boot_id=?").get(bootId);
         if (!session || session.generation !== latestGeneration) {
-          throw Object.assign(new Error("이미 교체된 이전 로버 부팅 세션의 보고입니다."), {
-            status: 409, reason: "stale_boot_session",
+          throw httpError(409, "The report is from a superseded rover boot session.", {
+            reason: "stale_boot_session",
           });
         }
         if (reportSeq <= session.last_report_seq) {
@@ -1687,8 +1186,8 @@ export function createMissionV2Store(db) {
           WHERE boot_id=? AND generation=? AND last_report_seq<?`)
           .run(reportSeq, now, bootId, latestGeneration, reportSeq).changes;
         if (advanced !== 1) {
-          throw Object.assign(new Error("로버 보고 순번 권위를 갱신하지 못했습니다."), {
-            status: 409, reason: "report_sequence_conflict",
+          throw httpError(409, "The rover report sequence could not advance.", {
+            reason: "report_sequence_conflict",
           });
         }
         return { duplicate: false, last_report_seq: reportSeq, value };
@@ -1785,16 +1284,13 @@ export function createMissionV2Store(db) {
   }
 
   return {
-    actorLabel,
     activeMission,
     activeMissionSummary,
     applyReport,
     claimRoverBootSession,
     createMission,
-    deletePreset,
     editRemaining,
     issueCommand,
-    listPresets,
     markCommandDeliveryFailed,
     markInterrupted,
     missionPublic,
@@ -1805,7 +1301,6 @@ export function createMissionV2Store(db) {
     processRoverReport,
     reconcileRoverBoot,
     recordEvent,
-    savePreset,
     waypointRows,
   };
 }

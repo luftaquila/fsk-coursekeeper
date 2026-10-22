@@ -4,14 +4,14 @@ Drive I/O (motor PWM, steering servo, encoder, battery ADC, E-Stop,
 watchdog) plus the mission-specific peristaltic pump (GP6, IRLZ44N
 MOSFET) all live on the RP2040 coprocessor (`rover/mcu/`); the Pi
 drives no GPIO. The Pi runs five ROS 2 nodes: gps, navigator,
-mcu_bridge, spray, bridge (course server).
-Secrets (INTERNAL_SECRET, NTRIP credentials) come from the environment
-only — never on the ROS param tree.
+mcu_bridge, spray, bridge (rover hub).
+Secrets (NTRIP credentials, optional INTERNAL_SECRET/ROVER_SECRET) come
+from the environment only — never on the ROS param tree.
 """
 
 import os
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, RegisterEventHandler, Shutdown
+from launch.actions import DeclareLaunchArgument, OpaqueFunction, RegisterEventHandler, Shutdown
 from launch.event_handlers import OnProcessExit
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
@@ -28,7 +28,7 @@ def generate_launch_description():
     )
     server_url_arg = DeclareLaunchArgument(
         'server_url', default_value='',
-        description='Course server URL',
+        description='Rover hub URL; empty keeps server_url from config_file',
     )
 
     config_file = LaunchConfiguration('config_file')
@@ -58,11 +58,17 @@ def generate_launch_description():
         parameters=[config_file], output='screen',
     )
 
-    bridge_node = Node(
-        package='pilot', executable='bridge_node', name='bridge_node',
-        parameters=[config_file, {'server_url': LaunchConfiguration('server_url')}],
-        output='screen',
-    )
+    def bridge_node(context):
+        # pilot-run passes server_url:=${SERVER_URL:-}; an empty value must not
+        # override the hub URL in config_file.
+        parameters = [config_file]
+        server_url = LaunchConfiguration('server_url').perform(context)
+        if server_url:
+            parameters.append({'server_url': server_url})
+        return [Node(
+            package='pilot', executable='bridge_node', name='bridge_node',
+            parameters=parameters, output='screen',
+        )]
 
     # The MCU link is load-bearing for ANY operation: without the RP2040 there
     # is no motor PWM, steering, E-Stop or watchdog, so manual teleop can't run
@@ -92,6 +98,6 @@ def generate_launch_description():
         mcu_bridge_node,
         spray_node,
         navigator_node,
-        bridge_node,
+        OpaqueFunction(function=bridge_node),
         mcu_bridge_exit_shutdown,
     ])

@@ -1,0 +1,19 @@
+{
+  "name": "fsk-coursekeeper-hub",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rover hub: mission ledger and operator API that runs on the rover",
+  "type": "module",
+  "main": "index.mjs",
+  "license": "Beerware",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node index.mjs"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0",
+    "express": "^5.2.1"
+  }
+}

@@ -482,3 +482,29 @@ def test_report_position_explicit_request_drains_ids():
     assert payload["request_id"] == "rid-1"
     assert payload["request_ids"] == ["rid-1", "rid-2"]
     assert len(node._pending_position_request_ids) == 0   # drained on send
+
+
+# ---- server URL rule ----------------------------------------------------------
+
+from pilot.bridge_node import server_url_allowed  # noqa: E402
+
+
+@pytest.mark.parametrize("url", [
+    "", "https://hub.example", "https://127.0.0.1:10100",
+    "http://127.0.0.1:10100", "http://localhost:10100", "http://LOCALHOST:10100",
+    "http://[::1]:10100",
+])
+def test_server_url_allowed(url):
+    assert server_url_allowed(url) is True
+
+
+@pytest.mark.parametrize("url", [
+    "http://10.0.0.5:10100", "http://127.0.0.1.evil.example", "http://127.0.0.1@evil.example",
+    "http://127.0.0.2:10100", "ftp://127.0.0.1", "http://[::1", "127.0.0.1:10100",
+])
+def test_server_url_rejected(url):
+    assert server_url_allowed(url) is False
+
+
+def test_server_url_allow_http_flag():
+    assert server_url_allowed("http://10.0.0.5:10100", allow_http=True) is True

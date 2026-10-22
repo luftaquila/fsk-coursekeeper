@@ -1,253 +1,91 @@
 import { after, before, describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
+import { openDatabase } from "../../rover/hub/server/db.mjs";
+import { createMissionV2Store } from "../../rover/hub/server/mission-v2.mjs";
+import { initializeHubSchema } from "../../rover/hub/server/schema.mjs";
 import {
-  cleanup,
-  createClient,
-  makeAuthCookie,
-  setupTestEnv,
-  startServer,
-  stopServer,
+  TEST_COURSE,
+  cleanupDb,
+  coneItems,
+  startHub,
   tmpDbPath,
-  TRUST_JWT,
-  TEST_INTERNAL_SECRET,
-} from "../helpers/test-utils.mjs";
+} from "./helpers.mjs";
 
-setupTestEnv();
+const FIXTURE_COURSE = Object.freeze({ id: 41, name: "Fixture Course" });
+const FIXTURE_POINTS = coneItems([
+  [35.0, 126.0, "left", 101],
+  [35.00001, 126.00001, "right", 102],
+  [35.00002, 126.00002, "left", 103],
+]);
 
-import { createCourseApp } from "../../course/index.mjs";
-import { createMissionV2Store, setupMissionV2Schema } from "../../course/mission-v2.mjs";
-import { validateSupportDatabase } from "../../competition/lib/support-database-validation.mjs";
-
-const requireFromCourse = createRequire(new URL("../../course/package.json", import.meta.url));
-const Database = requireFromCourse("better-sqlite3");
-
-const adminCookie = makeAuthCookie({ email: "admin@test.com", name: "Admin", role: "admin" });
-const internalHeaders = { "X-Internal-Service": TEST_INTERNAL_SECRET };
-
-let server;
-let baseUrl;
-let client;
-let db;
-let dbPath;
-let courseId;
-let coneIds;
-let storeFixtureSeq = 0;
-
-function deferred() {
-  let resolve;
-  let reject;
-  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
-  return { promise, resolve, reject };
-}
-
+// A bare store on an in-memory hub schema.
 function createStoreFixture() {
-  const fixturePath = tmpDbPath();
-  const created = createCourseApp({ dbPath: fixturePath, skipStaticValidation: true });
-  const fixtureDb = created.db;
-  const now = Date.now();
-  const fixtureCourseId = Number(fixtureDb.prepare(
-    "INSERT INTO course (name,created_at,updated_at) VALUES (?,?,?)",
-  ).run(`fixture-${++storeFixtureSeq}`, new Date(now).toISOString(), new Date(now).toISOString()).lastInsertRowid);
-  const insertCone = fixtureDb.prepare(`INSERT INTO cone
-    (course_id,lat,lng,alt,side,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`);
-  const fixtureConeIds = [0, 1, 2].map((index) => Number(insertCone.run(
-    fixtureCourseId, 35 + index * 0.00001, 126 + index * 0.00001,
-    null, index % 2 ? "right" : "left", new Date(now).toISOString(), new Date(now).toISOString(),
-  ).lastInsertRowid));
+  const db = openDatabase(":memory:");
+  initializeHubSchema(db);
   return {
-    db: fixtureDb,
-    store: createMissionV2Store(fixtureDb),
-    courseId: fixtureCourseId,
-    coneIds: fixtureConeIds,
-    close() { fixtureDb.close(); cleanup(fixturePath); },
-  };
-}
-
-function coneSnapshotItems(database, ids) {
-  const select = database.prepare("SELECT id,lat,lng,alt,side FROM cone WHERE id=?");
-  return ids.map((id) => {
-    const cone = select.get(id);
-    assert.ok(cone, `missing test cone ${id}`);
-    return { cone_id: cone.id, lat: cone.lat, lng: cone.lng, alt: cone.alt, side: cone.side };
-  });
-}
-
-async function openRover(bootId = "boot-v2-a", targetBaseUrl = baseUrl) {
-  const controller = new AbortController();
-  const response = await fetch(`${targetBaseUrl}/api/rover/stream?protocol_version=2&boot_id=${bootId}`, {
-    headers: { ...internalHeaders, Accept: "text/event-stream" },
-    signal: controller.signal,
-  });
-  assert.equal(response.status, 200);
-  const waiters = [];
-  const buffered = [];
-  const ready = deferred();
-  const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const pump = (async () => {
-    let buffer = "";
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let split;
-        while ((split = buffer.indexOf("\n\n")) !== -1) {
-          const block = buffer.slice(0, split);
-          buffer = buffer.slice(split + 2);
-          let event = null;
-          let data = "";
-          for (const line of block.split("\n")) {
-            if (line.startsWith("event: ")) event = line.slice(7);
-            else if (line.startsWith("data: ")) data += line.slice(6);
-          }
-          if (!event) continue;
-          const item = { event, data: data ? JSON.parse(data) : {} };
-          if (event === "connected") ready.resolve(item);
-          const waiterIndex = waiters.findIndex((waiter) => waiter.event === event && (!waiter.match || waiter.match(item.data)));
-          if (waiterIndex >= 0) waiters.splice(waiterIndex, 1)[0].resolve(item);
-          else buffered.push(item);
-        }
-      }
-    } catch (error) {
-      if (error?.name !== "AbortError") {
-        ready.reject(error);
-        for (const waiter of waiters.splice(0)) waiter.reject(error);
-      }
-    }
-  })();
-  await ready.promise;
-  return {
-    bootId,
-    close: async () => {
-      // Cancel the active reader explicitly before aborting fetch. This gives
-      // the Web Streams pump a deterministic completion signal even when the
-      // repository-wide parallel runner has the HTTP client under load.
-      try { await reader.cancel(); } catch { /* already closed */ }
-      controller.abort();
-      await pump;
-      // Yield once so the server-side request close callback has completed
-      // before the test tears down the database. This is an event-loop barrier,
-      // not a timing sleep or synchronization poll.
-      await new Promise((resolve) => setImmediate(resolve));
+    db,
+    store: createMissionV2Store(db),
+    items: (indices) => indices.map((index) => ({ ...FIXTURE_POINTS[index] })),
+    create(indices = [0], options = {}) {
+      return this.store.createMission({ course: FIXTURE_COURSE, items: this.items(indices), ...options });
     },
-    waitFor(event, match = null) {
-      const index = buffered.findIndex((item) => item.event === event && (!match || match(item.data)));
-      if (index >= 0) return Promise.resolve(buffered.splice(index, 1)[0]);
-      const waiter = deferred();
-      waiters.push({ event, match, ...waiter });
-      return waiter.promise;
-    },
+    close() { db.close(); },
   };
 }
 
-async function jsonRequest(method, path, body, { internal = false } = {}) {
-  return jsonRequestWithClient(client, method, path, body, { internal });
-}
+let ctx;
+let cones;
+let reportSeq = 0;
 
-async function jsonRequestWithClient(targetClient, method, path, body, { internal = false } = {}) {
-  const response = await targetClient[method](path, {
-    cookie: internal ? undefined : adminCookie,
-    headers: internal ? internalHeaders : undefined,
-    body,
-  });
-  const text = await response.text();
-  let data = null;
-  if (text) {
-    try { data = JSON.parse(text); } catch { data = text; }
-  }
-  return { response, data };
-}
-
-async function startRestartableCourseApp(targetDbPath) {
-  const created = createCourseApp({
-    dbPath: targetDbPath,
-    validateUser: TRUST_JWT,
-    deviceStaleMs: 10 * 60 * 1000,
-  });
-  const started = await startServer(created.app);
-  return {
-    ...started,
-    db: created.db,
-    client: createClient(started.baseUrl),
-  };
-}
-
-async function stopRestartableCourseApp(instance) {
-  if (!instance) return;
-  instance.server.closeAllConnections?.();
-  await stopServer(instance.server);
-  await new Promise((resolve) => setImmediate(resolve));
-  instance.db.close();
-}
+const createMission = (items, finishBehavior = "stop") => ctx.operator.json("POST", "/api/missions", {
+  course: TEST_COURSE,
+  finish_behavior: finishBehavior,
+  items,
+});
+const command = (missionId, action, body = {}) => ctx.operator.json("POST", `/api/missions/${missionId}/${action}`, body);
+const report = (rover, body) => ctx.device.json("POST", "/api/rover/mission-report", {
+  protocol_version: 2,
+  boot_id: rover.bootId,
+  ...body,
+});
+const telemetry = (body) => ctx.device.json("POST", "/api/rover/telemetry", body);
 
 async function waitForActiveMission(match, attempts = 100) {
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const body = await (await client.get("/api/missions/active", { cookie: adminCookie })).json();
-    if (match(body.mission)) return body.mission;
+    const mission = await ctx.activeMission();
+    if (match(mission)) return mission;
     await new Promise((resolve) => setImmediate(resolve));
   }
-  assert.fail("active mission did not reach the expected state before the deterministic event-loop barrier limit");
+  assert.fail("active mission did not reach the expected state");
 }
 
 before(async () => {
-  dbPath = tmpDbPath();
-  // This suite deliberately keeps SSE streams open while exercising many
-  // state transitions. Under the repository-wide parallel runner, CPU-heavy
-  // sibling suites can stretch wall time beyond the production 15 s telemetry
-  // watchdog even though the in-process test rover is healthy. Keep liveness
-  // expiry out of protocol tests; disconnect/stale transitions are triggered
-  // explicitly and deterministically below.
-  const app = createCourseApp({
-    dbPath,
-    validateUser: TRUST_JWT,
-    deviceStaleMs: 10 * 60 * 1000,
-  });
-  db = app.db;
-  const started = await startServer(app.app);
-  server = started.server;
-  baseUrl = started.baseUrl;
-  client = createClient(baseUrl);
-
-  let result = await jsonRequest("post", "/api/courses", { name: "Mission V2" });
-  assert.equal(result.response.status, 201);
-  courseId = result.data.id;
-  coneIds = [];
-  for (const [lat, lng, side] of [
-    [35.0, 126.0, "left"],
-    [35.00001, 126.00001, "right"],
-    [35.00002, 126.00002, "center"],
-  ]) {
-    result = await jsonRequest("post", `/api/courses/${courseId}/cones`, { lat, lng, side });
-    assert.equal(result.response.status, 201);
-    coneIds.push(result.data.id);
-  }
+  ctx = await startHub();
+  cones = coneItems([
+    [35.0, 126.0, "left", 1],
+    [35.00001, 126.00001, "right", 2],
+    [35.00002, 126.00002, "center", 3],
+  ]);
 });
 
-describe("durable rover report sequence across app restarts", () => {
+after(async () => {
+  await ctx.stop();
+});
+
+describe("durable rover report sequence across hub restarts", () => {
   it("rejects duplicate and terminal reports through the real endpoint after process recreation", async () => {
-    const restartDbPath = tmpDbPath();
+    const dbPath = tmpDbPath();
     const bootId = "boot-http-restart-sequence";
-    let appInstance = null;
-    let rover = null;
-    let mission;
-    let terminalReport;
+    let instance = null;
     try {
-      appInstance = await startRestartableCourseApp(restartDbPath);
-      const now = new Date().toISOString();
-      const localCourseId = Number(appInstance.db.prepare(
-        "INSERT INTO course (name,created_at,updated_at) VALUES (?,?,?)",
-      ).run("HTTP restart sequence", now, now).lastInsertRowid);
-      const localConeId = Number(appInstance.db.prepare(`INSERT INTO cone
-        (course_id,lat,lng,alt,side,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`)
-        .run(localCourseId, 35, 126, null, "left", now, now).lastInsertRowid);
-      const localStore = createMissionV2Store(appInstance.db);
-      mission = localStore.createMission({
-        courseId: localCourseId,
-        items: coneSnapshotItems(appInstance.db, [localConeId]),
+      instance = await startHub({ dbPath });
+      const created = await instance.operator.json("POST", "/api/missions", {
+        course: TEST_COURSE,
+        items: coneItems([[35, 126, "left", 1]]),
       });
-      rover = await openRover(bootId, appInstance.baseUrl);
+      assert.equal(created.status, 201);
+      const mission = created.data;
+      await instance.openRover(bootId);
       const heldReport = {
         protocol_version: 2,
         boot_id: bootId,
@@ -259,31 +97,22 @@ describe("durable rover report sequence across app restarts", () => {
         motion_state: "held",
         completed_waypoint_ids: [],
       };
-      const held = await jsonRequestWithClient(
-        appInstance.client, "post", "/api/rover/mission-report", heldReport, { internal: true },
-      );
-      assert.equal(held.response.status, 200);
+      const held = await instance.device.json("POST", "/api/rover/mission-report", heldReport);
+      assert.equal(held.status, 200);
       assert.equal(held.data.duplicate, undefined);
-      await rover.close();
-      rover = null;
-      await stopRestartableCourseApp(appInstance);
-      appInstance = null;
+      await instance.stop({ keepDb: true });
 
-      appInstance = await startRestartableCourseApp(restartDbPath);
-      rover = await openRover(bootId, appInstance.baseUrl);
-      const duplicate = await jsonRequestWithClient(
-        appInstance.client, "post", "/api/rover/mission-report", heldReport, { internal: true },
-      );
-      assert.equal(duplicate.response.status, 200);
+      instance = await startHub({ dbPath });
+      const rover = await instance.openRover(bootId);
+      const duplicate = await instance.device.json("POST", "/api/rover/mission-report", heldReport);
+      assert.equal(duplicate.status, 200);
       assert.equal(duplicate.data.duplicate, true);
 
       const endEvent = rover.waitFor("mission-command", (data) => data.action === "end");
-      const end = await jsonRequestWithClient(
-        appInstance.client, "post", `/api/missions/${mission.id}/end`, {},
-      );
-      assert.equal(end.response.status, 202);
+      const end = await instance.operator.json("POST", `/api/missions/${mission.id}/end`, {});
+      assert.equal(end.status, 202);
       const endCommand = (await endEvent).data;
-      terminalReport = {
+      const terminalReport = {
         protocol_version: 2,
         boot_id: bootId,
         report_seq: 8,
@@ -295,203 +124,22 @@ describe("durable rover report sequence across app restarts", () => {
         command_result: "accepted",
         motion_state: "held",
       };
-      const terminal = await jsonRequestWithClient(
-        appInstance.client, "post", "/api/rover/mission-report", terminalReport, { internal: true },
-      );
-      assert.equal(terminal.response.status, 200);
+      const terminal = await instance.device.json("POST", "/api/rover/mission-report", terminalReport);
+      assert.equal(terminal.status, 200);
       assert.equal(terminal.data.mission.status, "cancelled");
       assert.equal(terminal.data.reset_mission, true);
-      await rover.close();
-      rover = null;
-      await stopRestartableCourseApp(appInstance);
-      appInstance = null;
+      await instance.stop({ keepDb: true });
 
-      appInstance = await startRestartableCourseApp(restartDbPath);
-      rover = await openRover(bootId, appInstance.baseUrl);
-      const terminalDuplicate = await jsonRequestWithClient(
-        appInstance.client, "post", "/api/rover/mission-report", terminalReport, { internal: true },
-      );
-      assert.equal(terminalDuplicate.response.status, 200);
+      instance = await startHub({ dbPath });
+      await instance.openRover(bootId);
+      const terminalDuplicate = await instance.device.json("POST", "/api/rover/mission-report", terminalReport);
+      assert.equal(terminalDuplicate.status, 200);
       assert.equal(terminalDuplicate.data.duplicate, true);
       assert.equal(terminalDuplicate.data.reset_mission, true);
       assert.equal(terminalDuplicate.data.mission.status, "cancelled");
     } finally {
-      if (rover) await rover.close();
-      if (appInstance) await stopRestartableCourseApp(appInstance);
-      cleanup(restartDbPath);
-    }
-  });
-});
-
-after(async () => {
-  server.closeAllConnections?.();
-  await stopServer(server);
-  await new Promise((resolve) => setImmediate(resolve));
-  db.close();
-  cleanup(dbPath);
-});
-
-describe("mission route presets", () => {
-  it("bounds missions to hundreds-scale routes and presets", () => {
-    const fixture = createStoreFixture();
-    try {
-      const coneId = fixture.coneIds[0];
-      const oversized = coneSnapshotItems(
-        fixture.db,
-        Array.from({ length: 1001 }, () => coneId),
-      );
-      assert.throws(() => fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: oversized,
-      }), /1,000개/);
-
-      for (let index = 0; index < 20; index += 1) {
-        fixture.store.savePreset({
-          courseId: fixture.courseId,
-          name: `bounded-${index}`,
-          items: coneSnapshotItems(fixture.db, [coneId]),
-        });
-      }
-      assert.throws(() => fixture.store.savePreset({
-        courseId: fixture.courseId,
-        name: "one-too-many",
-        items: coneSnapshotItems(fixture.db, [coneId]),
-      }), (error) => error?.reason === "preset_limit");
-    } finally {
-      fixture.close();
-    }
-  });
-
-  it("stores arbitrary order and explicit duplicate cone occurrences", async () => {
-    const result = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
-      course_id: courseId,
-      name: "Reverse with repeat",
-      finish_behavior: "return_to_start",
-      items: coneSnapshotItems(db, [coneIds[2], coneIds[0], coneIds[2]]),
-    });
-    assert.equal(result.response.status, 201);
-    assert.deepEqual(result.data.items.map((item) => item.cone_id), [coneIds[2], coneIds[0], coneIds[2]]);
-    assert.equal(result.data.finish_behavior, "return_to_start");
-
-    const duplicateName = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
-      course_id: courseId,
-      name: "reverse WITH repeat",
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[0]]),
-    });
-    assert.equal(duplicateName.response.status, 409);
-  });
-
-  it("marks a preset stale instead of silently dropping a deleted cone", async () => {
-    const created = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
-      course_id: courseId,
-      name: "Will become stale",
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[1]]),
-    });
-    assert.equal(created.response.status, 201);
-    const deleted = await client.delete(`/api/cones/${coneIds[1]}`, { cookie: adminCookie });
-    assert.equal(deleted.status, 200);
-    const list = await client.get(`/api/courses/${courseId}/mission-presets`, { cookie: adminCookie });
-    const body = await list.json();
-    const stale = body.presets.find((preset) => preset.id === created.data.id);
-    assert.equal(stale.stale, true);
-    assert.equal(stale.items[0].cone_id, null);
-    assert.equal(stale.items[0].cone_id_snapshot, coneIds[1]);
-  });
-
-  it("rejects a stale preset revision without overwriting the newer value", async () => {
-    const created = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
-      course_id: courseId,
-      name: "Preset CAS",
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[0]]),
-    });
-    assert.equal(created.response.status, 201);
-    assert.match(created.data.preset_revision, /^[a-f0-9]{64}$/);
-    const updated = await jsonRequest("put", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
-      course_id: courseId,
-      name: "Preset CAS current",
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[2]]),
-      expected_preset_revision: created.data.preset_revision,
-    });
-    assert.equal(updated.response.status, 200);
-    const stale = await jsonRequest("put", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
-      course_id: courseId,
-      name: "Preset CAS stale",
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[0]]),
-      expected_preset_revision: created.data.preset_revision,
-    });
-    assert.equal(stale.response.status, 409);
-    const list = await (await client.get(
-      `/api/courses/${courseId}/mission-presets`, { cookie: adminCookie },
-    )).json();
-    assert.equal(list.presets.find((preset) => preset.id === created.data.id).name, "Preset CAS current");
-
-    const staleDelete = await jsonRequest("delete", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
-      expected_preset_revision: created.data.preset_revision,
-    });
-    assert.equal(staleDelete.response.status, 409);
-    assert.equal(staleDelete.data.reason, "preset_revision_mismatch");
-    assert.equal(staleDelete.data.current_preset_revision, updated.data.preset_revision);
-    const currentDelete = await jsonRequest("delete", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
-      expected_preset_revision: updated.data.preset_revision,
-    });
-    assert.equal(currentDelete.response.status, 204);
-  });
-
-  it("requires reviewed cone values and an exact preset revision when creating", () => {
-    const fixture = createStoreFixture();
-    try {
-      const items = coneSnapshotItems(fixture.db, [fixture.coneIds[0], fixture.coneIds[2]]);
-      const preset = fixture.store.savePreset({
-        courseId: fixture.courseId,
-        name: "Reviewed preset",
-        finishBehavior: "stop",
-        items,
-      }).after;
-      assert.throws(() => fixture.store.createMission({
-        courseId: fixture.courseId,
-        presetId: preset.id,
-        expectedPresetRevision: "stale",
-        finishBehavior: "stop",
-        items,
-      }), (error) => error.reason === "preset_revision_mismatch");
-      assert.throws(() => fixture.store.createMission({
-        courseId: fixture.courseId,
-        presetId: preset.id,
-        expectedPresetRevision: preset.preset_revision,
-        finishBehavior: "stop",
-        items: [...items].reverse(),
-      }), (error) => error.reason === "preset_route_mismatch");
-      const missionFromPreset = fixture.store.createMission({
-        courseId: fixture.courseId,
-        presetId: preset.id,
-        expectedPresetRevision: preset.preset_revision,
-        finishBehavior: "stop",
-        items,
-      });
-      assert.equal(missionFromPreset.preset_id, preset.id);
-    } finally {
-      fixture.close();
-    }
-  });
-
-  it("rejects a preset snapshot after the live cone value changes", () => {
-    const fixture = createStoreFixture();
-    try {
-      const items = coneSnapshotItems(fixture.db, [fixture.coneIds[0]]);
-      fixture.db.prepare("UPDATE cone SET lat=lat+0.0001 WHERE id=?").run(fixture.coneIds[0]);
-      assert.throws(() => fixture.store.savePreset({
-        courseId: fixture.courseId,
-        name: "Stale geometry",
-        items,
-      }), (error) => error.reason === "cone_snapshot_mismatch");
-      assert.equal(fixture.store.listPresets(fixture.courseId).length, 0);
-    } finally {
-      fixture.close();
+      if (instance) await instance.stop({ keepDb: true });
+      cleanupDb(dbPath);
     }
   });
 });
@@ -500,126 +148,111 @@ describe("durable mission protocol", () => {
   let rover;
   let mission;
   let resumeCommand;
-  let reportSeq = 0;
 
-  it("creates a server-authoritative mission and starts only after v2 command acknowledgement", async () => {
-    rover = await openRover();
-    const reviewed = coneSnapshotItems(db, [coneIds[2], coneIds[0], coneIds[2]]);
-    const changedAfterReview = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: reviewed.map((item, position) => position === 1 ? { ...item, side: "right" } : item),
-    });
-    assert.equal(changedAfterReview.response.status, 409);
-    assert.equal(changedAfterReview.data.reason, "cone_snapshot_mismatch");
-    assert.equal(changedAfterReview.data.position, 1);
-    assert.equal(changedAfterReview.data.cone_id, coneIds[0]);
-    assert.equal(changedAfterReview.data.current_cone.side, "left");
-    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM mission WHERE protocol_version=2").get().n, 0);
-    const created = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: reviewed,
-    });
-    assert.equal(created.response.status, 201);
+  it("creates a mission from supplied geometry and starts only after v2 command acknowledgement", async () => {
+    rover = await ctx.openRover("boot-v2-a");
+    const route = [cones[2], cones[0], cones[2]];
+    const invalid = await createMission(route.map((item, position) => (position === 1 ? { ...item, side: "middle" } : item)));
+    assert.equal(invalid.status, 400);
+    assert.equal(invalid.data.reason, "invalid_item");
+    assert.equal(invalid.data.position, 1);
+    assert.equal(invalid.data.cone_id, cones[0].cone_id);
+    assert.equal(ctx.db.prepare("SELECT COUNT(*) AS n FROM mission").get().n, 0);
+
+    const created = await createMission(route);
+    assert.equal(created.status, 201);
     mission = created.data;
     assert.equal(mission.status, "ready");
+    assert.equal(mission.course_id, TEST_COURSE.id);
+    assert.equal(mission.course_name, TEST_COURSE.name);
     assert.equal(mission.waypoints.length, 3);
     assert.equal(new Set(mission.waypoints.map((waypoint) => waypoint.id)).size, 3);
+    assert.deepEqual(
+      mission.waypoints.map(({ cone_id, lat, lng, alt, side }) => ({ cone_id, lat, lng, alt, side })),
+      route,
+    );
 
     const commandPromise = rover.waitFor("mission-command", (data) => data.action === "start");
-    const start = await jsonRequest("post", `/api/missions/${mission.id}/start`, {
+    const start = await command(mission.id, "start", {
       expected_plan_hash: mission.plan_hash,
       expected_occurrence_revision: mission.occurrence_revision,
     });
-    assert.equal(start.response.status, 202);
+    assert.equal(start.status, 202);
     assert.equal(start.data.mission.status, "starting");
-    const command = (await commandPromise).data;
-    assert.equal(command.mission_id, mission.id);
-    assert.deepEqual(command.waypoints.map((waypoint) => waypoint.id), mission.waypoints.map((waypoint) => waypoint.id));
+    const startCommand = (await commandPromise).data;
+    assert.equal(startCommand.mission_id, mission.id);
+    assert.deepEqual(startCommand.waypoints.map((waypoint) => waypoint.id), mission.waypoints.map((waypoint) => waypoint.id));
 
-    const malformedAck = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    const malformedAck = await report(rover, {
       report_seq: reportSeq + 1,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "command",
-      command_id: command.command_id,
-      command_seq: command.command_seq,
-    }, { internal: true });
-    assert.equal(malformedAck.response.status, 400);
+      command_id: startCommand.command_id,
+      command_seq: startCommand.command_seq,
+    });
+    assert.equal(malformedAck.status, 400);
 
-    const ack = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    const ack = await report(rover, {
       report_seq: ++reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "command",
-      command_id: command.command_id,
-      command_seq: command.command_seq,
+      command_id: startCommand.command_id,
+      command_seq: startCommand.command_seq,
       command_result: "accepted",
       motion_state: "running",
       start_position: { lat: 35.0, lng: 126.0 },
-    }, { internal: true });
-    assert.equal(ack.response.status, 200);
+    });
+    assert.equal(ack.status, 200);
     assert.equal(ack.data.mission.status, "running");
   });
 
   it("does not complete from an uncorrelated IDLE telemetry frame", async () => {
-    let response = await jsonRequest("post", "/api/rover/telemetry", { boot_id: rover.bootId, nav_state: "NAVIGATING", fix_status: "rtk_fixed" }, { internal: true });
-    assert.equal(response.response.status, 200);
-    response = await jsonRequest("post", "/api/rover/telemetry", { boot_id: rover.bootId, nav_state: "IDLE", fix_status: "rtk_fixed" }, { internal: true });
-    assert.equal(response.response.status, 200);
-    assert.ok(db.prepare("SELECT COUNT(*) AS count FROM mission_telemetry WHERE mission_id=?")
+    let response = await telemetry({ boot_id: rover.bootId, nav_state: "NAVIGATING", fix_status: "rtk_fixed" });
+    assert.equal(response.status, 200);
+    response = await telemetry({ boot_id: rover.bootId, nav_state: "IDLE", fix_status: "rtk_fixed" });
+    assert.equal(response.status, 200);
+    assert.ok(ctx.db.prepare("SELECT COUNT(*) AS count FROM mission_telemetry WHERE mission_id=?")
       .get(mission.id).count >= 2);
-    const active = await client.get("/api/missions/active", { cookie: adminCookie });
-    const body = await active.json();
-    assert.equal(body.mission.id, mission.id);
-    assert.equal(body.mission.status, "running");
+    const active = await ctx.activeMission();
+    assert.equal(active.id, mission.id);
+    assert.equal(active.status, "running");
 
-    const manual = await client.post("/api/rover/control", {
-      cookie: adminCookie,
-      body: { throttle: 10, steering: 0 },
-    });
+    const manual = await ctx.operator.json("POST", "/api/rover/control", { throttle: 10, steering: 0 });
     assert.equal(manual.status, 409, "manual motion must be gated until autonomy is held");
   });
 
   it("keeps the same mission id while editing and resuming only pending occurrences", async () => {
     const first = mission.waypoints[0];
-    const completed = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    const completed = await report(rover, {
       report_seq: ++reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "waypoint_completed",
       waypoint_id: first.id,
-    }, { internal: true });
-    assert.equal(completed.response.status, 200);
+    });
+    assert.equal(completed.status, 200);
 
-    const held = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    const held = await report(rover, {
       report_seq: ++reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "held",
       reason: "operator_pause",
-    }, { internal: true });
+    });
     assert.equal(held.data.mission.status, "paused");
     mission = held.data.mission;
     const preEditHash = mission.plan_hash;
 
     const pending = mission.waypoints.filter((waypoint) => waypoint.state === "pending");
-    const edited = await jsonRequest("put", `/api/missions/${mission.id}/remaining`, {
+    const edited = await ctx.operator.json("PUT", `/api/missions/${mission.id}/remaining`, {
       expected_plan_hash: mission.plan_hash,
       expected_occurrence_revision: mission.occurrence_revision,
       finish_behavior: "stop",
       items: [{ waypoint_id: pending[1].id }],
     });
-    assert.equal(edited.response.status, 200);
+    assert.equal(edited.status, 200);
     mission = edited.data;
     assert.equal(mission.id, completed.data.mission.id);
     assert.equal(mission.waypoints.filter((waypoint) => waypoint.state === "completed").length, 1);
@@ -627,29 +260,27 @@ describe("durable mission protocol", () => {
     assert.equal(mission.skipped_waypoint_count, 1);
     assert.equal(mission.waypoints.filter((waypoint) => waypoint.state === "pending").length, 1);
 
-    const staleEdit = await jsonRequest("put", `/api/missions/${mission.id}/remaining`, {
+    const staleEdit = await ctx.operator.json("PUT", `/api/missions/${mission.id}/remaining`, {
       expected_plan_hash: preEditHash,
       expected_occurrence_revision: mission.occurrence_revision,
       finish_behavior: "stop",
       items: [{ waypoint_id: pending[1].id }],
     });
-    assert.equal(staleEdit.response.status, 409);
+    assert.equal(staleEdit.status, 409);
 
     const commandPromise = rover.waitFor("mission-command", (data) => data.action === "resume");
-    const resume = await jsonRequest("post", `/api/missions/${mission.id}/resume`, {
+    const resume = await command(mission.id, "resume", {
       expected_plan_hash: mission.plan_hash,
       expected_occurrence_revision: mission.occurrence_revision,
     });
-    assert.equal(resume.response.status, 202);
+    assert.equal(resume.status, 202);
     resumeCommand = (await commandPromise).data;
     assert.equal(resumeCommand.mission_id, mission.id);
     assert.deepEqual(resumeCommand.waypoints.map((waypoint) => waypoint.id), [pending[1].id]);
   });
 
   it("completes only from correlated durable reports and tolerates replay", async () => {
-    let result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    let result = await report(rover, {
       report_seq: ++reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
@@ -658,123 +289,108 @@ describe("durable mission protocol", () => {
       command_seq: resumeCommand.command_seq,
       command_result: "accepted",
       motion_state: "running",
-    }, { internal: true });
+    });
     assert.equal(result.data.mission.status, "running");
 
     const pendingId = mission.waypoints.find((waypoint) => waypoint.state === "pending").id;
     for (let replay = 0; replay < 2; replay += 1) {
-      result = await jsonRequest("post", "/api/rover/mission-report", {
-        protocol_version: 2,
-        boot_id: rover.bootId,
+      result = await report(rover, {
         report_seq: ++reportSeq,
         mission_id: mission.id,
         plan_hash: mission.plan_hash,
         event: "waypoint_completed",
         waypoint_id: pendingId,
-      }, { internal: true });
-      assert.equal(result.response.status, 200);
+      });
+      assert.equal(result.status, 200);
     }
 
-    result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    result = await report(rover, {
       report_seq: ++reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "mission_completed",
       completed_waypoint_ids: [pendingId],
-    }, { internal: true });
+    });
     assert.equal(result.data.mission.status, "completed");
     assert.equal(result.data.reset_mission, true);
-    const duplicateCompletion = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    const duplicateCompletion = await report(rover, {
       report_seq: reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "mission_completed",
       completed_waypoint_ids: [pendingId],
-    }, { internal: true });
-    assert.equal(duplicateCompletion.response.status, 200);
+    });
+    assert.equal(duplicateCompletion.status, 200);
     assert.equal(duplicateCompletion.data.duplicate, true);
     assert.equal(duplicateCompletion.data.reset_mission, true);
     assert.equal(duplicateCompletion.data.mission.status, "completed");
-    const active = await (await client.get("/api/missions/active", { cookie: adminCookie })).json();
-    assert.equal(active.mission, null);
+    assert.equal(await ctx.activeMission(), null);
 
-    const restoredAfterCrash = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: rover.bootId,
+    const restoredAfterCrash = await report(rover, {
       report_seq: ++reportSeq,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "state",
       motion_state: "held",
       completed_waypoint_ids: [pendingId],
-    }, { internal: true });
-    assert.equal(restoredAfterCrash.response.status, 200);
+    });
+    assert.equal(restoredAfterCrash.status, 200);
     assert.equal(restoredAfterCrash.data.reset_mission, true);
   });
 
   it("rejects stale boot reports", async () => {
-    const stale = await jsonRequest("post", "/api/rover/mission-report", {
+    const stale = await ctx.device.json("POST", "/api/rover/mission-report", {
       protocol_version: 2,
       boot_id: "old-boot",
       report_seq: 999,
       mission_id: mission.id,
       plan_hash: mission.plan_hash,
       event: "mission_completed",
-    }, { internal: true });
-    assert.equal(stale.response.status, 409);
+    });
+    assert.equal(stale.status, 409);
     await rover.close();
   });
 
   it("holds a moving mission when a different rover boot takes over", async () => {
-    const firstBoot = await openRover("boot-restart-a");
-    const created = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[0]]),
-    });
-    assert.equal(created.response.status, 201);
+    const firstBoot = await ctx.openRover("boot-restart-a");
+    const created = await createMission([cones[0]]);
+    assert.equal(created.status, 201);
     const nextMission = created.data;
 
     const commandPromise = firstBoot.waitFor("mission-command", (data) => data.action === "start");
-    const start = await jsonRequest("post", `/api/missions/${nextMission.id}/start`, {
+    const start = await command(nextMission.id, "start", {
       expected_plan_hash: nextMission.plan_hash,
       expected_occurrence_revision: nextMission.occurrence_revision,
     });
-    assert.equal(start.response.status, 202);
-    const command = (await commandPromise).data;
-    const accepted = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: firstBoot.bootId,
+    assert.equal(start.status, 202);
+    const startCommand = (await commandPromise).data;
+    const accepted = await report(firstBoot, {
       report_seq: ++reportSeq,
       mission_id: nextMission.id,
       plan_hash: nextMission.plan_hash,
       event: "command",
-      command_id: command.command_id,
-      command_seq: command.command_seq,
+      command_id: startCommand.command_id,
+      command_seq: startCommand.command_seq,
       command_result: "accepted",
       motion_state: "running",
-    }, { internal: true });
+    });
     assert.equal(accepted.data.mission.status, "running");
 
-    const replacementBoot = await openRover("boot-restart-b");
+    const replacementBoot = await ctx.openRover("boot-restart-b");
     const bootHold = await replacementBoot.waitFor("mission-safety-hold");
     assert.equal(bootHold.data.mission_id, nextMission.id);
     assert.equal(bootHold.data.reason, "rover_rebooted");
-    const active = await (await client.get("/api/missions/active", { cookie: adminCookie })).json();
-    assert.equal(active.mission.id, nextMission.id);
-    assert.equal(active.mission.status, "interrupted");
-    assert.equal(active.mission.hold_reason, "rover_rebooted");
+    const active = await ctx.activeMission();
+    assert.equal(active.id, nextMission.id);
+    assert.equal(active.status, "interrupted");
+    assert.equal(active.hold_reason, "rover_rebooted");
 
-    const estopLogCountBefore = db.prepare(
+    const estopLogCountBefore = ctx.db.prepare(
       "SELECT COUNT(*) AS count FROM logs WHERE action='mission.v2.estop_observed'",
     ).get().count;
-    const originalPrepare = db.prepare;
+    const originalPrepare = ctx.db.prepare;
     let fullWaypointSelectExecutions = 0;
-    db.prepare = function instrumentWaypointSelect(sql) {
+    ctx.db.prepare = function instrumentWaypointSelect(sql) {
       const statement = originalPrepare.call(this, sql);
       if (/^\s*SELECT\s+\*\s+FROM\s+mission_waypoint\s+WHERE\s+mission_id\s*=\s*\?/i.test(sql)) {
         const originalAll = statement.all;
@@ -787,53 +403,45 @@ describe("durable mission protocol", () => {
     };
     try {
       for (let frame = 0; frame < 3; frame += 1) {
-        const estopDuringRebootHold = await jsonRequest("post", "/api/rover/telemetry", {
+        const estopDuringRebootHold = await telemetry({
           boot_id: replacementBoot.bootId,
           nav_state: "EMERGENCY_STOP",
-        }, { internal: true });
-        assert.equal(estopDuringRebootHold.response.status, 200);
+        });
+        assert.equal(estopDuringRebootHold.status, 200);
       }
       for (let frame = 0; frame < 3; frame += 1) {
-        const manualDuringUnconfirmedHold = await client.post("/api/rover/control", {
-          cookie: adminCookie,
-          body: { throttle: 10, steering: frame },
+        const manualDuringUnconfirmedHold = await ctx.operator.json("POST", "/api/rover/control", {
+          throttle: 10, steering: frame,
         });
         assert.equal(manualDuringUnconfirmedHold.status, 409);
       }
       assert.equal(fullWaypointSelectExecutions, 0);
     } finally {
-      delete db.prepare;
+      delete ctx.db.prepare;
     }
-    const estopLogCountAfter = db.prepare(
+    const estopLogCountAfter = ctx.db.prepare(
       "SELECT COUNT(*) AS count FROM logs WHERE action='mission.v2.estop_observed'",
     ).get().count;
     assert.equal(estopLogCountAfter - estopLogCountBefore, 1);
-    const afterEstop = await (await client.get("/api/missions/active", { cookie: adminCookie })).json();
-    assert.equal(afterEstop.mission.active_hold_id, bootHold.data.hold_id);
-    assert.equal(afterEstop.mission.hold_reason, "rover_rebooted");
-    assert.equal(afterEstop.mission.motion_confirmed_held, false);
-    await jsonRequest("post", "/api/rover/telemetry", {
-      boot_id: replacementBoot.bootId,
-      nav_state: "IDLE",
-    }, { internal: true });
+    const afterEstop = await ctx.activeMission();
+    assert.equal(afterEstop.active_hold_id, bootHold.data.hold_id);
+    assert.equal(afterEstop.hold_reason, "rover_rebooted");
+    assert.equal(afterEstop.motion_confirmed_held, false);
+    await telemetry({ boot_id: replacementBoot.bootId, nav_state: "IDLE" });
 
-    const strayRunning = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: replacementBoot.bootId,
+    const strayRunning = await report(replacementBoot, {
       report_seq: ++reportSeq,
       mission_id: nextMission.id,
       plan_hash: nextMission.plan_hash,
       event: "state",
       motion_state: "running",
       completed_waypoint_ids: [],
-    }, { internal: true });
-    assert.equal(strayRunning.response.status, 200);
+    });
+    assert.equal(strayRunning.status, 200);
     assert.equal(strayRunning.data.mission.status, "interrupted");
     assert.equal(strayRunning.data.mission.hold_reason, "rover_rebooted");
 
-    const restoredHold = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: replacementBoot.bootId,
+    const restoredHold = await report(replacementBoot, {
       report_seq: ++reportSeq,
       mission_id: nextMission.id,
       plan_hash: nextMission.plan_hash,
@@ -842,65 +450,60 @@ describe("durable mission protocol", () => {
       checkpoint_persisted: true,
       reason: "checkpoint_restored",
       completed_waypoint_ids: [],
-    }, { internal: true });
+    });
     assert.equal(restoredHold.data.mission.status, "paused");
     assert.equal(restoredHold.data.mission.motion_confirmed_held, true);
 
-    const delayedRunning = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: replacementBoot.bootId,
+    const delayedRunning = await report(replacementBoot, {
       report_seq: ++reportSeq,
       mission_id: nextMission.id,
       plan_hash: nextMission.plan_hash,
       event: "state",
       motion_state: "running",
       completed_waypoint_ids: [],
-    }, { internal: true });
+    });
     assert.equal(delayedRunning.data.mission.status, "paused");
     assert.equal(delayedRunning.data.mission.hold_reason, "checkpoint_restored");
 
     await firstBoot.close();
     const endPromise = replacementBoot.waitFor("mission-command", (data) => data.action === "end");
-    const ended = await jsonRequest("post", `/api/missions/${nextMission.id}/end`, {});
-    assert.equal(ended.response.status, 202);
+    const ended = await command(nextMission.id, "end");
+    assert.equal(ended.status, 202);
     assert.equal(ended.data.mission.status, "paused");
     const endCommand = (await endPromise).data;
-    const endAck = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: replacementBoot.bootId, report_seq: ++reportSeq,
-      mission_id: nextMission.id, plan_hash: nextMission.plan_hash,
-      event: "command", command_id: endCommand.command_id,
-      command_seq: endCommand.command_seq, command_result: "accepted", motion_state: "held",
-    }, { internal: true });
+    const endAck = await report(replacementBoot, {
+      report_seq: ++reportSeq,
+      mission_id: nextMission.id,
+      plan_hash: nextMission.plan_hash,
+      event: "command",
+      command_id: endCommand.command_id,
+      command_seq: endCommand.command_seq,
+      command_result: "accepted",
+      motion_state: "held",
+    });
     assert.equal(endAck.data.mission.status, "cancelled");
     await replacementBoot.close();
   });
 
   it("re-adopts motion only for a reconnect from the same boot", async () => {
-    const firstConnection = await openRover("boot-network-reconnect");
-    const created = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[2]]),
-    });
-    const reconnectMission = created.data;
+    const firstConnection = await ctx.openRover("boot-network-reconnect");
+    const reconnectMission = (await createMission([cones[2]])).data;
     const commandPromise = firstConnection.waitFor("mission-command", (data) => data.action === "start");
-    await jsonRequest("post", `/api/missions/${reconnectMission.id}/start`, {
+    await command(reconnectMission.id, "start", {
       expected_plan_hash: reconnectMission.plan_hash,
       expected_occurrence_revision: reconnectMission.occurrence_revision,
     });
-    const command = (await commandPromise).data;
-    let result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: firstConnection.bootId,
+    const startCommand = (await commandPromise).data;
+    let result = await report(firstConnection, {
       report_seq: ++reportSeq,
       mission_id: reconnectMission.id,
       plan_hash: reconnectMission.plan_hash,
       event: "command",
-      command_id: command.command_id,
-      command_seq: command.command_seq,
+      command_id: startCommand.command_id,
+      command_seq: startCommand.command_seq,
       command_result: "accepted",
       motion_state: "running",
-    }, { internal: true });
+    });
     assert.equal(result.data.mission.status, "running");
 
     await firstConnection.close();
@@ -908,158 +511,149 @@ describe("durable mission protocol", () => {
     assert.equal(activeMission.hold_reason, "sse_disconnect");
     assert.equal(activeMission.motion_confirmed_held, false);
 
-    const editWhileMotionUnconfirmed = await jsonRequest("put", `/api/missions/${reconnectMission.id}/remaining`, {
+    const editWhileMotionUnconfirmed = await ctx.operator.json("PUT", `/api/missions/${reconnectMission.id}/remaining`, {
       expected_plan_hash: reconnectMission.plan_hash,
       expected_occurrence_revision: activeMission.occurrence_revision,
       finish_behavior: "stop",
       items: [{ waypoint_id: reconnectMission.waypoints[0].id }],
     });
-    assert.equal(editWhileMotionUnconfirmed.response.status, 409);
+    assert.equal(editWhileMotionUnconfirmed.status, 409);
 
-    const secondConnection = await openRover("boot-network-reconnect");
-    const manualBeforeReconcile = await client.post("/api/rover/control", {
-      cookie: adminCookie,
-      body: { throttle: 10, steering: 0 },
-    });
+    const secondConnection = await ctx.openRover("boot-network-reconnect");
+    const manualBeforeReconcile = await ctx.operator.json("POST", "/api/rover/control", { throttle: 10, steering: 0 });
     assert.equal(manualBeforeReconcile.status, 409);
 
-    result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2,
-      boot_id: secondConnection.bootId,
+    result = await report(secondConnection, {
       report_seq: ++reportSeq,
       mission_id: reconnectMission.id,
       plan_hash: reconnectMission.plan_hash,
       event: "state",
       motion_state: "running",
       completed_waypoint_ids: [],
-    }, { internal: true });
-    assert.equal(result.response.status, 200);
+    });
+    assert.equal(result.status, 200);
     assert.equal(result.data.mission.status, "running");
 
     await secondConnection.close();
-    const replacementConnection = await openRover("boot-after-network-interruption");
+    const replacementConnection = await ctx.openRover("boot-after-network-interruption");
     const hardHold = await replacementConnection.waitFor("mission-safety-hold", (data) =>
       data.mission_id === reconnectMission.id);
     assert.equal(hardHold.data.reason, "rover_rebooted");
     activeMission = await waitForActiveMission((candidate) => candidate?.hold_reason === "rover_rebooted");
     assert.equal(activeMission.status, "interrupted");
     assert.equal(activeMission.motion_confirmed_held, false);
-    const holdAck = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: replacementConnection.bootId, report_seq: ++reportSeq,
-      mission_id: reconnectMission.id, plan_hash: reconnectMission.plan_hash,
-      event: "held", hold_id: hardHold.data.hold_id, checkpoint_persisted: true,
+    const holdAck = await report(replacementConnection, {
+      report_seq: ++reportSeq,
+      mission_id: reconnectMission.id,
+      plan_hash: reconnectMission.plan_hash,
+      event: "held",
+      hold_id: hardHold.data.hold_id,
+      checkpoint_persisted: true,
       reason: "checkpoint_restored",
-    }, { internal: true });
+    });
     assert.equal(holdAck.data.mission.status, "paused");
     const endPromise = replacementConnection.waitFor("mission-command", (data) => data.action === "end");
-    const ended = await jsonRequest("post", `/api/missions/${reconnectMission.id}/end`, {});
-    assert.equal(ended.response.status, 202);
+    const ended = await command(reconnectMission.id, "end");
+    assert.equal(ended.status, 202);
     const endCommand = (await endPromise).data;
-    const endAck = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: replacementConnection.bootId, report_seq: ++reportSeq,
-      mission_id: reconnectMission.id, plan_hash: reconnectMission.plan_hash,
-      event: "command", command_id: endCommand.command_id,
-      command_seq: endCommand.command_seq, command_result: "accepted", motion_state: "held",
-    }, { internal: true });
+    const endAck = await report(replacementConnection, {
+      report_seq: ++reportSeq,
+      mission_id: reconnectMission.id,
+      plan_hash: reconnectMission.plan_hash,
+      event: "command",
+      command_id: endCommand.command_id,
+      command_seq: endCommand.command_seq,
+      command_result: "accepted",
+      motion_state: "held",
+    });
     assert.equal(endAck.data.mission.status, "cancelled");
     await replacementConnection.close();
   });
 
   it("replays only the same pending action and lets end supersede it", async () => {
-    const commandRover = await openRover("boot-command-conflict");
-    const created = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[0]]),
-    });
-    const conflictMission = created.data;
-    const courseDelete = await client.delete(`/api/courses/${courseId}`, { cookie: adminCookie });
-    assert.equal(courseDelete.status, 409);
-    assert.equal((await courseDelete.json()).reason, "active_mission_course");
-    assert.ok(db.prepare(`SELECT 1 FROM logs WHERE action='course.delete' AND level='warn'
-      AND json_extract(detail,'$.reason')='active_mission_course' ORDER BY id DESC LIMIT 1`).get());
-    const staleOccurrence = await jsonRequest("post", `/api/missions/${conflictMission.id}/start`, {
+    const commandRover = await ctx.openRover("boot-command-conflict");
+    const conflictMission = (await createMission([cones[0]])).data;
+    const staleOccurrence = await command(conflictMission.id, "start", {
       expected_plan_hash: conflictMission.plan_hash,
       expected_occurrence_revision: "0".repeat(64),
     });
-    assert.equal(staleOccurrence.response.status, 409);
+    assert.equal(staleOccurrence.status, 409);
     assert.equal(staleOccurrence.data.reason, "occurrence_revision_mismatch");
     assert.equal(staleOccurrence.data.current_occurrence_revision, conflictMission.occurrence_revision);
-    const staleStart = await jsonRequest("post", `/api/missions/${conflictMission.id}/start`, {
+    const staleStart = await command(conflictMission.id, "start", {
       expected_plan_hash: "0".repeat(64),
       expected_occurrence_revision: conflictMission.occurrence_revision,
     });
-    assert.equal(staleStart.response.status, 409);
-    assert.equal((await (await client.get("/api/missions/active", { cookie: adminCookie })).json()).mission.status, "ready");
+    assert.equal(staleStart.status, 409);
+    assert.equal((await ctx.activeMission()).status, "ready");
     const startPromise = commandRover.waitFor("mission-command", (data) =>
       data.mission_id === conflictMission.id && data.action === "start");
-    const start = await jsonRequest("post", `/api/missions/${conflictMission.id}/start`, {
+    const start = await command(conflictMission.id, "start", {
       expected_plan_hash: conflictMission.plan_hash,
       expected_occurrence_revision: conflictMission.occurrence_revision,
     });
     const startCommand = (await startPromise).data;
-    assert.equal(start.response.status, 202);
+    assert.equal(start.status, 202);
 
-    const conflictingPause = await jsonRequest("post", `/api/missions/${conflictMission.id}/pause`, {});
-    assert.equal(conflictingPause.response.status, 409);
+    const conflictingPause = await command(conflictMission.id, "pause");
+    assert.equal(conflictingPause.status, 409);
+    assert.equal(conflictingPause.data.reason, "command_in_progress");
 
     const replayPromise = commandRover.waitFor("mission-command", (data) =>
       data.command_id === startCommand.command_id);
-    const replay = await jsonRequest("post", `/api/missions/${conflictMission.id}/start`, {
+    const replay = await command(conflictMission.id, "start", {
       expected_plan_hash: conflictMission.plan_hash,
       expected_occurrence_revision: conflictMission.occurrence_revision,
     });
-    assert.equal(replay.response.status, 202);
+    assert.equal(replay.status, 202);
     assert.equal(replay.data.replay, true);
     assert.equal((await replayPromise).data.action, "start");
 
     const endPromise = commandRover.waitFor("mission-command", (data) =>
       data.mission_id === conflictMission.id && data.action === "end");
-    const ended = await jsonRequest("post", `/api/missions/${conflictMission.id}/end`, {});
+    const ended = await command(conflictMission.id, "end");
     const endCommand = (await endPromise).data;
-    assert.equal(ended.response.status, 202);
+    assert.equal(ended.status, 202);
     assert.equal(ended.data.mission.status, "starting");
-    const successor = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[2]]),
-    });
-    assert.equal(successor.response.status, 409);
-    const manualBeforeEndAck = await client.post("/api/rover/control", {
-      cookie: adminCookie,
-      body: { throttle: 10, steering: 0 },
-    });
+    const successor = await createMission([cones[2]]);
+    assert.equal(successor.status, 409);
+    assert.equal(successor.data.reason, "active_mission");
+    const manualBeforeEndAck = await ctx.operator.json("POST", "/api/rover/control", { throttle: 10, steering: 0 });
     assert.equal(manualBeforeEndAck.status, 409);
     assert.equal(endCommand.command_seq, startCommand.command_seq + 1);
-    const storedStart = db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(startCommand.command_id);
-    assert.deepEqual(storedStart, { state: "superseded", reject_reason: "operator_end" });
-    const endAck = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: commandRover.bootId, report_seq: ++reportSeq,
-      mission_id: conflictMission.id, plan_hash: conflictMission.plan_hash,
-      event: "command", command_id: endCommand.command_id,
-      command_seq: endCommand.command_seq, command_result: "accepted", motion_state: "held",
-    }, { internal: true });
+    const storedStart = ctx.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(startCommand.command_id);
+    assert.deepEqual({ ...storedStart }, { state: "superseded", reject_reason: "operator_end" });
+    const endAck = await report(commandRover, {
+      report_seq: ++reportSeq,
+      mission_id: conflictMission.id,
+      plan_hash: conflictMission.plan_hash,
+      event: "command",
+      command_id: endCommand.command_id,
+      command_seq: endCommand.command_seq,
+      command_result: "accepted",
+      motion_state: "held",
+    });
     assert.equal(endAck.data.mission.status, "cancelled");
     await commandRover.close();
   });
 
   it("rejects an A to B to A rover stream takeover before replacing the current session", async () => {
-    const bootA = await openRover("boot-lease-a");
-    const bootB = await openRover("boot-lease-b");
-    const currentPosition = await jsonRequest("post", "/api/rover/position", {
+    const bootA = await ctx.openRover("boot-lease-a");
+    const bootB = await ctx.openRover("boot-lease-b");
+    const currentPosition = await ctx.device.json("POST", "/api/rover/position", {
       boot_id: bootB.bootId, lat: 35, lng: 126,
-    }, { internal: true });
-    assert.equal(currentPosition.response.status, 200);
-    const stalePosition = await jsonRequest("post", "/api/rover/position", {
+    });
+    assert.equal(currentPosition.status, 200);
+    const stalePosition = await ctx.device.json("POST", "/api/rover/position", {
       boot_id: bootA.bootId, lat: 0, lng: 0,
-    }, { internal: true });
-    assert.equal(stalePosition.response.status, 409);
-    const staleA = await fetch(`${baseUrl}/api/rover/stream?protocol_version=2&boot_id=${bootA.bootId}`, {
-      headers: { ...internalHeaders, Accept: "text/event-stream" },
+    });
+    assert.equal(stalePosition.status, 409);
+    const staleA = await fetch(`${ctx.deviceUrl}/api/rover/stream?protocol_version=2&boot_id=${bootA.bootId}`, {
+      headers: { Accept: "text/event-stream" },
     });
     assert.equal(staleA.status, 409);
-    assert.match(await staleA.text(), /이전 로버 부팅 세션/);
-    const status = await (await client.get("/api/rover/status", { cookie: adminCookie })).json();
+    assert.match(await staleA.text(), /superseded rover boot session/);
+    const status = await ctx.status();
     assert.equal(status.mission_protocol.boot_id, bootB.bootId);
     assert.equal(status.connected, true);
     assert.equal(status.last_position.lat, 35);
@@ -1069,107 +663,109 @@ describe("durable mission protocol", () => {
   });
 
   it("binds telemetry to the current boot and confirms E-Stop hold only from authoritative telemetry", async () => {
-    const estopRover = await openRover("boot-estop-current");
-    const created = await jsonRequest("post", "/api/missions", {
-      course_id: courseId,
-      finish_behavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[0]]),
-    });
-    const estopMission = created.data;
+    const estopRover = await ctx.openRover("boot-estop-current");
+    const estopMission = (await createMission([cones[0]])).data;
     const startPromise = estopRover.waitFor("mission-command", (data) => data.action === "start");
-    await jsonRequest("post", `/api/missions/${estopMission.id}/start`, {
+    await command(estopMission.id, "start", {
       expected_plan_hash: estopMission.plan_hash,
       expected_occurrence_revision: estopMission.occurrence_revision,
     });
     const startCommand = (await startPromise).data;
-    let result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: estopRover.bootId, report_seq: ++reportSeq,
-      mission_id: estopMission.id, plan_hash: estopMission.plan_hash,
-      event: "command", command_id: startCommand.command_id,
-      command_seq: startCommand.command_seq, command_result: "accepted", motion_state: "running",
-    }, { internal: true });
+    let result = await report(estopRover, {
+      report_seq: ++reportSeq,
+      mission_id: estopMission.id,
+      plan_hash: estopMission.plan_hash,
+      event: "command",
+      command_id: startCommand.command_id,
+      command_seq: startCommand.command_seq,
+      command_result: "accepted",
+      motion_state: "running",
+    });
     assert.equal(result.data.mission.status, "running");
 
-    const staleTelemetry = await jsonRequest("post", "/api/rover/telemetry", {
-      boot_id: "boot-lease-b", nav_state: "EMERGENCY_STOP",
-    }, { internal: true });
-    assert.equal(staleTelemetry.response.status, 409);
-    assert.equal((await (await client.get("/api/missions/active", { cookie: adminCookie })).json()).mission.status, "running");
+    const staleTelemetry = await telemetry({ boot_id: "boot-lease-b", nav_state: "EMERGENCY_STOP" });
+    assert.equal(staleTelemetry.status, 409);
+    assert.equal((await ctx.activeMission()).status, "running");
 
-    const stopped = await jsonRequest("post", "/api/rover/stop", {});
-    assert.equal(stopped.response.status, 200);
-    let active = await (await client.get("/api/missions/active", { cookie: adminCookie })).json();
-    assert.equal(active.mission.status, "running");
-    assert.equal(active.mission.motion_confirmed_held, false);
+    const stopped = await ctx.operator.json("POST", "/api/rover/stop", {});
+    assert.equal(stopped.status, 200);
+    let active = await ctx.activeMission();
+    assert.equal(active.status, "running");
+    assert.equal(active.motion_confirmed_held, false);
 
-    result = await jsonRequest("post", "/api/rover/telemetry", {
-      boot_id: estopRover.bootId, nav_state: "EMERGENCY_STOP",
-    }, { internal: true });
-    assert.equal(result.response.status, 200);
-    active = await (await client.get("/api/missions/active", { cookie: adminCookie })).json();
-    assert.equal(active.mission.status, "interrupted");
-    assert.equal(active.mission.hold_reason, "emergency_stop");
-    assert.equal(active.mission.motion_confirmed_held, true);
+    result = await telemetry({ boot_id: estopRover.bootId, nav_state: "EMERGENCY_STOP" });
+    assert.equal(result.status, 200);
+    active = await ctx.activeMission();
+    assert.equal(active.status, "interrupted");
+    assert.equal(active.hold_reason, "emergency_stop");
+    assert.equal(active.motion_confirmed_held, true);
 
     const clearEvent = estopRover.waitFor("clear-emergency");
-    const clear = await jsonRequest("post", "/api/rover/clear-emergency", {});
-    assert.equal(clear.response.status, 200);
+    const clear = await ctx.operator.json("POST", "/api/rover/clear-emergency", {});
+    assert.equal(clear.status, 200);
     await clearEvent;
-    result = await jsonRequest("post", "/api/rover/telemetry", {
-      boot_id: estopRover.bootId, nav_state: "PAUSED",
-    }, { internal: true });
-    assert.equal(result.response.status, 200);
-    let roverStatus = await (await client.get("/api/rover/status", { cookie: adminCookie })).json();
-    assert.equal(roverStatus.stop_requested, true);
+    result = await telemetry({ boot_id: estopRover.bootId, nav_state: "PAUSED" });
+    assert.equal(result.status, 200);
+    assert.equal((await ctx.status()).stop_requested, true);
 
-    result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: estopRover.bootId, report_seq: ++reportSeq,
-      mission_id: estopMission.id, plan_hash: estopMission.plan_hash,
-      event: "held", motion_state: "held", reason: "emergency_stop_cleared",
-      emergency_stop_cleared: true, checkpoint_persisted: false,
-    }, { internal: true });
-    assert.equal(result.response.status, 200);
-    roverStatus = await (await client.get("/api/rover/status", { cookie: adminCookie })).json();
-    assert.equal(roverStatus.stop_requested, true);
+    result = await report(estopRover, {
+      report_seq: ++reportSeq,
+      mission_id: estopMission.id,
+      plan_hash: estopMission.plan_hash,
+      event: "held",
+      motion_state: "held",
+      reason: "emergency_stop_cleared",
+      emergency_stop_cleared: true,
+      checkpoint_persisted: false,
+    });
+    assert.equal(result.status, 200);
+    assert.equal((await ctx.status()).stop_requested, true);
 
-    result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: estopRover.bootId, report_seq: ++reportSeq,
-      mission_id: estopMission.id, plan_hash: estopMission.plan_hash,
-      event: "held", motion_state: "held", reason: "checkpoint_restored",
-      emergency_stop_cleared: true, checkpoint_persisted: true,
-    }, { internal: true });
-    assert.equal(result.response.status, 200);
+    result = await report(estopRover, {
+      report_seq: ++reportSeq,
+      mission_id: estopMission.id,
+      plan_hash: estopMission.plan_hash,
+      event: "held",
+      motion_state: "held",
+      reason: "checkpoint_restored",
+      emergency_stop_cleared: true,
+      checkpoint_persisted: true,
+    });
+    assert.equal(result.status, 200);
     assert.equal(result.data.mission.status, "paused");
-    roverStatus = await (await client.get("/api/rover/status", { cookie: adminCookie })).json();
-    assert.equal(roverStatus.stop_requested, false);
+    assert.equal((await ctx.status()).stop_requested, false);
 
     const resumePromise = estopRover.waitFor("mission-command", (data) => data.action === "resume");
-    const resume = await jsonRequest("post", `/api/missions/${estopMission.id}/resume`, {
+    const resume = await command(estopMission.id, "resume", {
       expected_plan_hash: result.data.mission.plan_hash,
       expected_occurrence_revision: result.data.mission.occurrence_revision,
     });
-    assert.equal(resume.response.status, 202);
+    assert.equal(resume.status, 202);
     await resumePromise;
 
     const endPromise = estopRover.waitFor("mission-command", (data) => data.action === "end");
-    await jsonRequest("post", `/api/missions/${estopMission.id}/end`, {});
+    await command(estopMission.id, "end");
     const endCommand = (await endPromise).data;
-    result = await jsonRequest("post", "/api/rover/mission-report", {
-      protocol_version: 2, boot_id: estopRover.bootId, report_seq: ++reportSeq,
-      mission_id: estopMission.id, plan_hash: estopMission.plan_hash,
-      event: "command", command_id: endCommand.command_id,
-      command_seq: endCommand.command_seq, command_result: "accepted", motion_state: "held",
-    }, { internal: true });
+    result = await report(estopRover, {
+      report_seq: ++reportSeq,
+      mission_id: estopMission.id,
+      plan_hash: estopMission.plan_hash,
+      event: "command",
+      command_id: endCommand.command_id,
+      command_seq: endCommand.command_seq,
+      command_result: "accepted",
+      motion_state: "held",
+    });
     assert.equal(result.data.mission.status, "cancelled");
     await estopRover.close();
   });
 
   it("makes a failed command delivery auditable and immediately resumable", () => {
-    const store = createMissionV2Store(db);
+    const store = createMissionV2Store(ctx.db);
     const deliveryMission = store.createMission({
-      courseId,
+      course: TEST_COURSE,
       finishBehavior: "stop",
-      items: coneSnapshotItems(db, [coneIds[2]]),
+      items: [cones[2]],
       actor: "test",
     });
     const issued = store.issueCommand({
@@ -1188,10 +784,10 @@ describe("durable mission protocol", () => {
     assert.equal(failed.motion_confirmed_held, false);
     assert.equal(failed.active_command_id, null);
     assert.deepEqual(
-      db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(issued.command.id),
+      { ...ctx.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(issued.command.id) },
       { state: "superseded", reject_reason: "command_delivery_failed" },
     );
-    assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM mission_event
+    assert.equal(ctx.db.prepare(`SELECT COUNT(*) AS n FROM mission_event
       WHERE mission_id=? AND event_type='command.delivery_failed'`).get(deliveryMission.id).n, 1);
     assert.throws(() => store.issueCommand({
       missionId: deliveryMission.id,
@@ -1245,14 +841,185 @@ describe("durable mission protocol", () => {
   });
 });
 
+describe("mission geometry supplied by the browser", () => {
+  let local;
+  before(async () => { local = await startHub(); });
+  after(async () => { await local.stop(); });
+
+  const valid = () => ({
+    course: { id: 12, name: "  Autocross  " },
+    preset_id: 5,
+    finish_behavior: "return_to_start",
+    items: [
+      { cone_id: 10, lat: 35.1, lng: 126.1, alt: 12.5, side: "left" },
+      { cone_id: null, lat: 35.10001, lng: 126.10001, alt: null, side: "center" },
+      { cone_id: 10, lat: 35.1, lng: 126.1, alt: 12.5, side: "left" },
+    ],
+  });
+
+  it("rejects malformed course, preset, finish behavior, and items without creating a mission", async () => {
+    const cases = [
+      [{ ...valid(), course: undefined }, "invalid_course"],
+      [{ ...valid(), course: { id: "12", name: "Autocross" } }, "invalid_course"],
+      [{ ...valid(), course: { id: 12.5, name: "Autocross" } }, "invalid_course"],
+      [{ ...valid(), course: { id: 12, name: "   " } }, "invalid_course"],
+      [{ ...valid(), course: { id: 12, name: "x".repeat(101) } }, "invalid_course"],
+      [{ ...valid(), preset_id: "5" }, "invalid_preset_id"],
+      [{ ...valid(), finish_behavior: "loop" }, null],
+      [{ ...valid(), items: [] }, null],
+      [{ ...valid(), items: "1,2,3" }, null],
+      [{ ...valid(), items: Array.from({ length: 1001 }, () => valid().items[0]) }, null],
+    ];
+    for (const [body, reason] of cases) {
+      const result = await local.operator.json("POST", "/api/missions", body);
+      assert.equal(result.status, 400, JSON.stringify(body).slice(0, 80));
+      if (reason) assert.equal(result.data.reason, reason);
+      else assert.equal(typeof result.data, "string");
+    }
+
+    const itemCases = [
+      [{ lat: 91 }, /latitude/],
+      [{ lng: "126" }, /longitude/],
+      [{ alt: "high" }, /altitude/],
+      [{ alt: 20000 }, /altitude/],
+      [{ side: undefined }, /side/],
+      [{ side: "middle" }, /side/],
+      [{ cone_id: "10" }, /cone_id/],
+      [{ cone_id: 1.5 }, /cone_id/],
+    ];
+    for (const [patch, message] of itemCases) {
+      const body = valid();
+      body.items[2] = { ...body.items[2], ...patch };
+      const result = await local.operator.json("POST", "/api/missions", body);
+      assert.equal(result.status, 400, JSON.stringify(patch));
+      assert.equal(result.data.reason, "invalid_item");
+      assert.equal(result.data.position, 2);
+      assert.match(result.data.message, /^Waypoint 3: /);
+      assert.match(result.data.message, message);
+    }
+    const nonObject = await local.operator.json("POST", "/api/missions", { ...valid(), items: [valid().items[0], 7] });
+    assert.equal(nonObject.status, 400);
+    assert.equal(nonObject.data.position, 1);
+    assert.equal(local.db.prepare("SELECT COUNT(*) AS n FROM mission").get().n, 0);
+  });
+
+  it("stores the course identity, preset id, and supplied geometry with no course tables", async () => {
+    const body = valid();
+    const created = await local.operator.json("POST", "/api/missions", body);
+    assert.equal(created.status, 201);
+    const mission = created.data;
+    assert.equal(mission.course_id, 12);
+    assert.equal(mission.course_name, "Autocross");
+    assert.equal(mission.preset_id, 5);
+    assert.equal(mission.finish_behavior, "return_to_start");
+    assert.equal(mission.protocol_version, 2);
+    assert.match(mission.plan_hash, /^[a-f0-9]{64}$/);
+    assert.deepEqual(
+      mission.waypoints.map(({ cone_id, lat, lng, alt, side }) => ({ cone_id, lat, lng, alt, side })),
+      body.items,
+    );
+    assert.deepEqual(mission.waypoints.map((waypoint) => waypoint.position), [0, 1, 2]);
+
+    const list = await local.operator.json("GET", "/api/missions");
+    assert.equal(list.status, 200);
+    assert.equal(list.data.total, 1);
+    assert.equal(list.data.missions[0].course_name, "Autocross");
+    assert.equal(list.data.missions[0].status, "ready");
+    assert.equal(list.data.missions[0].sample_count, 0);
+    const detail = await local.operator.json("GET", `/api/missions/${mission.id}`);
+    assert.equal(detail.data.course_name, "Autocross");
+    assert.equal(detail.data.events[0].event_type, "mission.created");
+    assert.deepEqual(detail.data.events[0].after, {
+      course_id: 12,
+      course_name: "Autocross",
+      preset_id: 5,
+      finish_behavior: "return_to_start",
+      plan_hash: mission.plan_hash,
+      waypoint_count: 3,
+    });
+    const samples = await local.operator.json("GET", `/api/missions/${mission.id}/telemetry`);
+    assert.deepEqual(samples.data, { samples: [] });
+
+    const tables = local.db.prepare(`SELECT name FROM sqlite_master WHERE type='table' AND name IN
+      ('course','cone','mission_route_preset','mission_route_preset_item','survey_point','gps_config')`).all();
+    assert.deepEqual(tables, []);
+    for (const table of ["mission", "mission_waypoint"]) {
+      const references = local.db.prepare(`PRAGMA foreign_key_list(${table})`).all().map((row) => row.table);
+      assert.ok(references.every((name) => name === "mission"), `${table} references ${references}`);
+    }
+  });
+
+  it("keeps remaining occurrences by waypoint id and adds new ones from supplied geometry", async () => {
+    const mission = await local.activeMission();
+    const eventCount = () => local.db.prepare("SELECT COUNT(*) AS n FROM mission_event WHERE mission_id=?")
+      .get(mission.id).n;
+    const eventsBefore = eventCount();
+    const rejected = await local.operator.json("PUT", `/api/missions/${mission.id}/remaining`, {
+      expected_plan_hash: mission.plan_hash,
+      expected_occurrence_revision: mission.occurrence_revision,
+      items: [
+        { waypoint_id: mission.waypoints[1].id },
+        { cone_id: 11, lat: 35.2, lng: 126.2, alt: null, side: "right" },
+        { cone_id: 12, lat: -95, lng: 126.2, alt: null, side: "right" },
+      ],
+    });
+    assert.equal(rejected.status, 400);
+    assert.equal(rejected.data.reason, "invalid_item");
+    assert.equal(rejected.data.position, 2);
+    assert.equal(rejected.data.cone_id, 12);
+    assert.deepEqual(await local.activeMission(), mission);
+    assert.equal(eventCount(), eventsBefore);
+
+    const unknownOccurrence = await local.operator.json("PUT", `/api/missions/${mission.id}/remaining`, {
+      expected_plan_hash: mission.plan_hash,
+      expected_occurrence_revision: mission.occurrence_revision,
+      items: [{ waypoint_id: "not-a-waypoint" }],
+    });
+    assert.equal(unknownOccurrence.status, 409);
+
+    const added = { cone_id: 11, lat: 35.10002, lng: 126.10002, alt: 3.25, side: "right" };
+    const edited = await local.operator.json("PUT", `/api/missions/${mission.id}/remaining`, {
+      expected_plan_hash: mission.plan_hash,
+      expected_occurrence_revision: mission.occurrence_revision,
+      finish_behavior: "stop",
+      items: [{ waypoint_id: mission.waypoints[2].id }, added, { waypoint_id: mission.waypoints[0].id }],
+    });
+    assert.equal(edited.status, 200);
+    assert.equal(edited.data.id, mission.id);
+    assert.equal(edited.data.finish_behavior, "stop");
+    assert.notEqual(edited.data.plan_hash, mission.plan_hash);
+    assert.equal(edited.data.skipped_waypoint_count, 1);
+    const [kept, inserted, keptLast] = edited.data.waypoints;
+    assert.equal(kept.id, mission.waypoints[2].id);
+    assert.equal(keptLast.id, mission.waypoints[0].id);
+    const { cone_id, lat, lng, alt, side } = inserted;
+    assert.deepEqual({ cone_id, lat, lng, alt, side }, added);
+    assert.equal(edited.data.hold_reason, "route_edited");
+  });
+});
+
 describe("mission v2 state-machine regressions", () => {
+  it("bounds missions to hundreds-scale routes", () => {
+    const fixture = createStoreFixture();
+    try {
+      const oversized = Array.from({ length: 1001 }, () => ({ ...FIXTURE_POINTS[0] }));
+      assert.throws(() => fixture.store.createMission({ course: FIXTURE_COURSE, items: oversized }), /1,000 waypoints/);
+      const mission = fixture.create();
+      assert.throws(() => fixture.store.editRemaining({
+        missionId: mission.id,
+        expectedPlanHash: mission.plan_hash,
+        expectedOccurrenceRevision: mission.occurrence_revision,
+        items: oversized,
+      }), /Invalid remaining route/);
+    } finally {
+      fixture.close();
+    }
+  });
+
   it("keeps the hot-path mission summary bounded and revisioned", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, fixture.coneIds),
-      });
+      const mission = fixture.create([0, 1, 2]);
       const summary = fixture.store.activeMissionSummary();
       assert.deepEqual(Object.keys(summary).sort(), [
         "active_command_id", "active_hold_id", "course_id", "course_name", "empty_plan_mode",
@@ -1260,7 +1027,8 @@ describe("mission v2 state-machine regressions", () => {
         "occurrence_revision", "plan_hash", "protocol_version", "status",
       ]);
       assert.equal(summary.id, mission.id);
-      assert.equal(summary.course_name, `fixture-${storeFixtureSeq}`);
+      assert.equal(summary.course_id, FIXTURE_COURSE.id);
+      assert.equal(summary.course_name, FIXTURE_COURSE.name);
       assert.equal(summary.occurrence_revision, mission.occurrence_revision);
       assert.equal(Object.hasOwn(summary, "waypoints"), false);
       summary.status = "tampered-client-copy";
@@ -1273,18 +1041,13 @@ describe("mission v2 state-machine regressions", () => {
   it("keeps skipped edit history out of operational mission snapshots", () => {
     const fixture = createStoreFixture();
     try {
-      let mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      let mission = fixture.create([0]);
       for (let index = 0; index < 25; index += 1) {
         mission = fixture.store.editRemaining({
           missionId: mission.id,
           expectedPlanHash: mission.plan_hash,
           expectedOccurrenceRevision: mission.occurrence_revision,
-          items: coneSnapshotItems(fixture.db, [
-            fixture.coneIds[(index + 1) % fixture.coneIds.length],
-          ]),
+          items: fixture.items([(index + 1) % FIXTURE_POINTS.length]),
         });
         assert.equal(mission.waypoints.length, 1);
       }
@@ -1298,76 +1061,21 @@ describe("mission v2 state-machine regressions", () => {
     }
   });
 
-  it("value-CASes new remaining occurrences without changing a rejected mission", () => {
-    const fixture = createStoreFixture();
-    try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
-      const reviewed = coneSnapshotItems(fixture.db, [fixture.coneIds[1]])[0];
-      const before = {
-        mission: fixture.store.missionPublic(mission.id),
-        eventCount: fixture.db.prepare("SELECT COUNT(*) AS n FROM mission_event WHERE mission_id=?")
-          .get(mission.id).n,
-      };
-      fixture.db.prepare("UPDATE cone SET lat=lat+0.001,side='center' WHERE id=?")
-        .run(fixture.coneIds[1]);
-      assert.throws(() => fixture.store.editRemaining({
-        missionId: mission.id,
-        expectedPlanHash: mission.plan_hash,
-        expectedOccurrenceRevision: mission.occurrence_revision,
-        items: [
-          { waypoint_id: mission.waypoints[0].id },
-          reviewed,
-        ],
-      }), (error) => {
-        assert.equal(error.reason, "cone_snapshot_mismatch");
-        assert.equal(error.position, 1);
-        assert.equal(error.current_cone.cone_id, fixture.coneIds[1]);
-        return true;
-      });
-      assert.deepEqual(fixture.store.missionPublic(mission.id), before.mission);
-      assert.equal(fixture.db.prepare("SELECT COUNT(*) AS n FROM mission_event WHERE mission_id=?")
-        .get(mission.id).n, before.eventCount);
-
-      const latest = coneSnapshotItems(fixture.db, [fixture.coneIds[1]])[0];
-      const edited = fixture.store.editRemaining({
-        missionId: mission.id,
-        expectedPlanHash: mission.plan_hash,
-        expectedOccurrenceRevision: mission.occurrence_revision,
-        items: [
-          { waypoint_id: mission.waypoints[0].id },
-          latest,
-        ],
-      });
-      assert.deepEqual(
-        edited.waypoints.slice(-1).map(({ cone_id, lat, lng, alt, side }) => ({ cone_id, lat, lng, alt, side })),
-        [latest],
-      );
-    } finally {
-      fixture.close();
-    }
-  });
-
   it("reconciles completed checkpoint ids on failed, held, and interrupted reports", () => {
     for (const event of ["waypoint_failed", "held", "interrupted"]) {
       const fixture = createStoreFixture();
       try {
-        const mission = fixture.store.createMission({
-          courseId: fixture.courseId,
-          items: coneSnapshotItems(fixture.db, fixture.coneIds.slice(0, 2)),
-        });
+        const mission = fixture.create([0, 1]);
         fixture.db.prepare("UPDATE mission SET lifecycle_state='running',status='running' WHERE id=?").run(mission.id);
-        const report = {
+        const reported = {
           mission_id: mission.id,
           plan_hash: mission.plan_hash,
           boot_id: `boot-${event}`,
           event,
           completed_waypoint_ids: [mission.waypoints[0].id],
         };
-        if (event === "waypoint_failed") report.waypoint_id = mission.waypoints[1].id;
-        const after = fixture.store.applyReport(report);
+        if (event === "waypoint_failed") reported.waypoint_id = mission.waypoints[1].id;
+        const after = fixture.store.applyReport(reported);
         assert.equal(after.waypoints[0].state, "completed", event);
         assert.equal(after.waypoints[0].outcome, "success", event);
       } finally {
@@ -1379,9 +1087,7 @@ describe("mission v2 state-machine regressions", () => {
   it("does not let a late accepted command overwrite a newer held report", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       const issued = fixture.store.issueCommand({
         missionId: mission.id, action: "start", expectedPlanHash: mission.plan_hash,
         expectedOccurrenceRevision: mission.occurrence_revision,
@@ -1407,10 +1113,7 @@ describe("mission v2 state-machine regressions", () => {
   it("keeps a pending resume through its pre-command held snapshot", () => {
     const fixture = createStoreFixture();
     try {
-      let mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      let mission = fixture.create([0]);
       fixture.db.prepare(`UPDATE mission SET lifecycle_state='paused',status='paused',
         hold_reason='checkpoint_restored' WHERE id=?`).run(mission.id);
       mission = fixture.store.missionPublic(mission.id);
@@ -1473,10 +1176,7 @@ describe("mission v2 state-machine regressions", () => {
   it("recovers a rejected start checkpoint to the direct-report ready state", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       const start = fixture.store.issueCommand({
         missionId: mission.id,
         action: "start",
@@ -1498,8 +1198,7 @@ describe("mission v2 state-machine regressions", () => {
       assert.equal(recovered.status, "ready");
       assert.equal(recovered.active_command_id, null);
       assert.deepEqual(
-        fixture.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?")
-          .get(start.command.id),
+        { ...fixture.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(start.command.id) },
         { state: "rejected", reject_reason: "preflight_rejected" },
       );
     } finally {
@@ -1510,9 +1209,7 @@ describe("mission v2 state-machine regressions", () => {
   it("keeps terminal state immutable when a pending command result arrives late", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       const issued = fixture.store.issueCommand({
         missionId: mission.id, action: "start", expectedPlanHash: mission.plan_hash,
         expectedOccurrenceRevision: mission.occurrence_revision,
@@ -1538,9 +1235,7 @@ describe("mission v2 state-machine regressions", () => {
   it("does not roll a confirmed held pause back to running when pause is rejected", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       fixture.db.prepare("UPDATE mission SET lifecycle_state='running',status='running' WHERE id=?").run(mission.id);
       const issued = fixture.store.issueCommand({ missionId: mission.id, action: "pause" });
       const payload = JSON.parse(issued.command.payload_json);
@@ -1564,9 +1259,7 @@ describe("mission v2 state-machine regressions", () => {
   it("does not label a rejected start as safely ready when the rover reports motion", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       const issued = fixture.store.issueCommand({
         missionId: mission.id, action: "start", expectedPlanHash: mission.plan_hash,
         expectedOccurrenceRevision: mission.occurrence_revision,
@@ -1591,9 +1284,7 @@ describe("mission v2 state-machine regressions", () => {
   it("accepts only explicit return-only or uncertainty-resolved empty plans", () => {
     const fixture = createStoreFixture();
     try {
-      let mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      let mission = fixture.create([0]);
       assert.throws(() => fixture.store.editRemaining({
         missionId: mission.id,
         expectedPlanHash: mission.plan_hash,
@@ -1634,10 +1325,7 @@ describe("mission v2 state-machine regressions", () => {
 
     const uncertainFixture = createStoreFixture();
     try {
-      let mission = uncertainFixture.store.createMission({
-        courseId: uncertainFixture.courseId,
-        items: coneSnapshotItems(uncertainFixture.db, uncertainFixture.coneIds.slice(0, 2)),
-      });
+      let mission = uncertainFixture.create([0, 1]);
       uncertainFixture.db.prepare("UPDATE mission SET lifecycle_state='running',status='running' WHERE id=?").run(mission.id);
       mission = uncertainFixture.store.applyReport({
         mission_id: mission.id, plan_hash: mission.plan_hash, boot_id: "boot-uncertain",
@@ -1676,12 +1364,10 @@ describe("mission v2 state-machine regressions", () => {
     }
   });
 
-  it("uses occurrence and preset revisions as value-based conditional writes", () => {
+  it("uses the occurrence revision as a value-based conditional write", () => {
     const fixture = createStoreFixture();
     try {
-      let mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      let mission = fixture.create([0]);
       const staleOccurrenceRevision = mission.occurrence_revision;
       mission = fixture.store.applyReport({
         mission_id: mission.id, plan_hash: mission.plan_hash, boot_id: "boot-revision",
@@ -1693,22 +1379,6 @@ describe("mission v2 state-machine regressions", () => {
         expectedOccurrenceRevision: staleOccurrenceRevision,
         items: [{ waypoint_id: mission.waypoints[0].id }],
       }), (error) => error.reason === "occurrence_revision_mismatch");
-
-      const created = fixture.store.savePreset({
-        courseId: fixture.courseId, name: "CAS",
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      }).after;
-      const updated = fixture.store.savePreset({
-        id: created.id, courseId: fixture.courseId, name: "CAS updated",
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[1]]),
-        expectedPresetRevision: created.preset_revision,
-      }).after;
-      assert.notEqual(updated.preset_revision, created.preset_revision);
-      assert.throws(() => fixture.store.savePreset({
-        id: created.id, courseId: fixture.courseId, name: "stale",
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[2]]),
-        expectedPresetRevision: created.preset_revision,
-      }), (error) => error.reason === "preset_revision_mismatch");
     } finally {
       fixture.close();
     }
@@ -1717,15 +1387,11 @@ describe("mission v2 state-machine regressions", () => {
   it("keeps end active until ACK and makes a failed end delivery authoritative", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       const end = fixture.store.issueCommand({ missionId: mission.id, action: "end" });
       assert.equal(end.mission.status, "ready");
       assert.equal(end.mission.active_command_id, end.command.id);
-      assert.throws(() => fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[1]]),
-      }), (error) => error.reason === "active_mission");
+      assert.throws(() => fixture.create([1]), (error) => error.reason === "active_mission");
       const endPayload = JSON.parse(end.command.payload_json);
       assert.throws(() => fixture.store.applyReport({
         mission_id: mission.id, plan_hash: mission.plan_hash, boot_id: "boot-end",
@@ -1738,7 +1404,7 @@ describe("mission v2 state-machine regressions", () => {
       assert.equal(failed.status, "interrupted");
       assert.equal(failed.active_command_id, null);
       assert.deepEqual(
-        fixture.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(end.command.id),
+        { ...fixture.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(end.command.id) },
         { state: "superseded", reject_reason: "command_delivery_failed" },
       );
     } finally {
@@ -1752,10 +1418,7 @@ describe("mission v2 state-machine regressions", () => {
       try {
         fixture.store.claimRoverBootSession(`${event}-boot-a`);
         fixture.store.claimRoverBootSession(`${event}-boot-b`);
-        const mission = fixture.store.createMission({
-          courseId: fixture.courseId,
-          items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-        });
+        const mission = fixture.create([0]);
         fixture.db.prepare(`UPDATE mission SET lifecycle_state='running',status='running',
           last_rover_boot_id=? WHERE id=?`).run(`${event}-boot-a`, mission.id);
         const held = fixture.store.reconcileRoverBoot(`${event}-boot-b`);
@@ -1797,10 +1460,7 @@ describe("mission v2 state-machine regressions", () => {
   it("retires a pending command atomically when completion becomes terminal", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       const start = fixture.store.issueCommand({
         missionId: mission.id,
         action: "start",
@@ -1817,8 +1477,7 @@ describe("mission v2 state-machine regressions", () => {
       assert.equal(completed.status, "completed");
       assert.equal(completed.active_command_id, null);
       assert.deepEqual(
-        fixture.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?")
-          .get(start.command.id),
+        { ...fixture.db.prepare("SELECT state,reject_reason FROM mission_command WHERE id=?").get(start.command.id) },
         { state: "superseded", reject_reason: "mission_completed" },
       );
       assert.equal(fixture.db.prepare("SELECT COUNT(*) AS n FROM mission_command WHERE state='pending'")
@@ -1834,9 +1493,7 @@ describe("mission v2 state-machine regressions", () => {
       assert.equal(fixture.store.claimRoverBootSession("boot-a").accepted, true);
       assert.equal(fixture.store.claimRoverBootSession("boot-b").accepted, true);
       assert.equal(fixture.store.claimRoverBootSession("boot-a").reason, "stale_boot_session");
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId, items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       fixture.db.prepare(`UPDATE mission SET lifecycle_state='running',status='running',
         last_rover_boot_id='boot-a' WHERE id=?`).run(mission.id);
       const held = fixture.store.reconcileRoverBoot("boot-b");
@@ -1866,12 +1523,13 @@ describe("mission v2 state-machine regressions", () => {
   it("persists report high-water across store recreation and advances it atomically", () => {
     const fixture = createStoreFixture();
     try {
+      const marker = fixture.db.prepare("INSERT INTO hub_config (key,value,updated_at) VALUES (?,'1',0)");
+      const markerCount = (key) => fixture.db.prepare("SELECT COUNT(*) AS n FROM hub_config WHERE key=?").get(key).n;
       assert.equal(fixture.store.claimRoverBootSession("boot-report-durable").last_report_seq, -1);
       let applied = 0;
       const first = fixture.store.processRoverReport("boot-report-durable", 7, () => {
         applied += 1;
-        fixture.db.prepare("UPDATE course SET name=name || '-applied' WHERE id=?")
-          .run(fixture.courseId);
+        marker.run("applied");
         return "first";
       });
       assert.deepEqual(first, { duplicate: false, last_report_seq: 7, value: "first" });
@@ -1884,14 +1542,13 @@ describe("mission v2 state-machine regressions", () => {
       assert.equal(applied, 1);
 
       assert.throws(() => restartedStore.processRoverReport("boot-report-durable", 8, () => {
-        fixture.db.prepare("UPDATE course SET name=name || '-rolled-back' WHERE id=?")
-          .run(fixture.courseId);
+        marker.run("rolled-back");
         throw new Error("apply failed");
       }), /apply failed/);
       assert.equal(fixture.db.prepare("SELECT last_report_seq FROM rover_boot_session WHERE boot_id=?")
         .get("boot-report-durable").last_report_seq, 7);
-      assert.doesNotMatch(fixture.db.prepare("SELECT name FROM course WHERE id=?")
-        .get(fixture.courseId).name, /rolled-back/);
+      assert.equal(markerCount("applied"), 1);
+      assert.equal(markerCount("rolled-back"), 0);
       assert.equal(restartedStore.processRoverReport("boot-report-durable", 8, () => "retry").value, "retry");
 
       const tableSql = fixture.db.prepare(`SELECT sql FROM sqlite_master
@@ -1903,8 +1560,6 @@ describe("mission v2 state-machine regressions", () => {
       fixture.db.pragma("ignore_check_constraints = OFF");
       assert.equal(restartedStore.claimRoverBootSession("boot-report-durable").reason,
         "invalid_report_sequence");
-      assert.throws(() => validateSupportDatabase(fixture.db, "course"),
-        /CHECK constraint failed in rover_boot_session|boot#boot-report-durable:session/);
     } finally {
       fixture.close();
     }
@@ -1915,10 +1570,7 @@ describe("mission v2 state-machine regressions", () => {
     try {
       const bootId = "boot-report-cache-rollback";
       fixture.store.claimRoverBootSession(bootId);
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       fixture.db.prepare("UPDATE mission SET lifecycle_state='running',status='running' WHERE id=?")
         .run(mission.id);
       fixture.store.missionPublic(mission.id);
@@ -1950,10 +1602,7 @@ describe("mission v2 state-machine regressions", () => {
       const fixture = createStoreFixture();
       try {
         fixture.store.claimRoverBootSession(`${event}-end-boot-a`);
-        const mission = fixture.store.createMission({
-          courseId: fixture.courseId,
-          items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-        });
+        const mission = fixture.create([0]);
         fixture.db.prepare(`UPDATE mission SET lifecycle_state='running',status='running',last_rover_boot_id=?
           WHERE id=?`).run(`${event}-end-boot-a`, mission.id);
         const end = fixture.store.issueCommand({
@@ -1961,11 +1610,7 @@ describe("mission v2 state-machine regressions", () => {
           action: "end",
           targetBootId: `${event}-end-boot-a`,
         });
-        const interrupted = fixture.store.markInterrupted(
-          mission.id,
-          "sse_disconnect",
-          `${event}-end-boot-a`,
-        );
+        const interrupted = fixture.store.markInterrupted(mission.id, "sse_disconnect", `${event}-end-boot-a`);
         assert.equal(interrupted.active_command_id, end.command.id);
         const reported = fixture.store.applyReport({
           mission_id: mission.id,
@@ -2009,210 +1654,37 @@ describe("mission v2 state-machine regressions", () => {
   it("retargets an offline pending end with no boot target on reconnect", () => {
     const fixture = createStoreFixture();
     try {
-      const mission = fixture.store.createMission({
-        courseId: fixture.courseId,
-        items: coneSnapshotItems(fixture.db, [fixture.coneIds[0]]),
-      });
+      const mission = fixture.create([0]);
       fixture.db.prepare(`UPDATE mission SET lifecycle_state='running',status='running',
-        last_rover_boot_id='boot-before-server-restart' WHERE id=?`).run(mission.id);
+        last_rover_boot_id='boot-before-hub-restart' WHERE id=?`).run(mission.id);
       const end = fixture.store.issueCommand({
         missionId: mission.id,
         action: "end",
         targetBootId: null,
       });
       assert.equal(JSON.parse(end.command.payload_json).target_boot_id, null);
-      fixture.store.claimRoverBootSession("boot-after-server-restart");
-      const reconciled = fixture.store.reconcileRoverBoot("boot-after-server-restart");
+      fixture.store.claimRoverBootSession("boot-after-hub-restart");
+      const reconciled = fixture.store.reconcileRoverBoot("boot-after-hub-restart");
       assert.equal(reconciled.active_command_id, end.command.id);
       const retargeted = fixture.db.prepare("SELECT rover_boot_id,payload_json,state FROM mission_command WHERE id=?")
         .get(end.command.id);
-      assert.equal(retargeted.rover_boot_id, "boot-after-server-restart");
-      assert.equal(JSON.parse(retargeted.payload_json).target_boot_id, "boot-after-server-restart");
+      assert.equal(retargeted.rover_boot_id, "boot-after-hub-restart");
+      assert.equal(JSON.parse(retargeted.payload_json).target_boot_id, "boot-after-hub-restart");
       assert.equal(retargeted.state, "pending");
     } finally {
       fixture.close();
     }
   });
-});
 
-describe("mission v2 legacy migration", () => {
-  it("adds durable report high-water to existing boot sessions without losing rows", () => {
+  it("enforces one open mission in the schema itself", () => {
     const fixture = createStoreFixture();
     try {
-      fixture.db.exec("DROP TABLE rover_boot_session");
-      fixture.db.exec(`CREATE TABLE rover_boot_session (
-        boot_id TEXT PRIMARY KEY,
-        generation INTEGER NOT NULL UNIQUE,
-        first_seen_at INTEGER NOT NULL,
-        last_seen_at INTEGER NOT NULL
-      )`);
-      fixture.db.prepare(`INSERT INTO rover_boot_session
-        (boot_id,generation,first_seen_at,last_seen_at) VALUES ('legacy-boot',1,100,200)`).run();
-      setupMissionV2Schema(fixture.db);
-      assert.deepEqual(fixture.db.prepare(`SELECT boot_id,generation,first_seen_at,last_seen_at,last_report_seq
-        FROM rover_boot_session`).get(), {
-        boot_id: "legacy-boot",
-        generation: 1,
-        first_seen_at: 100,
-        last_seen_at: 200,
-        last_report_seq: -1,
-      });
-      assert.equal(createMissionV2Store(fixture.db).claimRoverBootSession("legacy-boot").last_report_seq, -1);
-      assert.equal(validateSupportDatabase(fixture.db, "course"), true);
+      const mission = fixture.create([0]);
+      assert.throws(() => fixture.db.prepare(`INSERT INTO mission
+        (course_id,course_name,created_at,updated_at,lifecycle_state,status,finish_behavior,plan_hash,protocol_version)
+        VALUES (1,'x',0,0,'paused','paused','stop',?,2)`).run(mission.plan_hash), /UNIQUE/);
     } finally {
       fixture.close();
     }
-  });
-
-  it("audits every legacy open mission closed by the one-active migration", () => {
-    const legacyDb = new Database(":memory:");
-    legacyDb.pragma("foreign_keys = ON");
-    legacyDb.exec(`
-      CREATE TABLE course (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-      CREATE TABLE cone (
-        id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, lat REAL NOT NULL,
-        lng REAL NOT NULL, alt REAL, side TEXT NOT NULL,
-        FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE CASCADE
-      );
-      CREATE TABLE mission (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, started_at INTEGER NOT NULL,
-        ended_at INTEGER, status TEXT NOT NULL DEFAULT 'running', waypoints_json TEXT NOT NULL,
-        current_waypoint_idx INTEGER NOT NULL DEFAULT 0, spray_results_json TEXT NOT NULL DEFAULT '{}',
-        updated_at INTEGER, actor TEXT,
-        FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE SET NULL
-      );
-      INSERT INTO course (id,name) VALUES (1,'Legacy duplicates');
-      INSERT INTO mission (id,course_id,started_at,status,waypoints_json)
-        VALUES (1,1,1000,'running','[{"lat":35,"lng":126}]');
-      INSERT INTO mission (id,course_id,started_at,status,waypoints_json)
-        VALUES (2,1,2000,'paused','[{"lat":35.1,"lng":126.1}]');
-    `);
-    setupMissionV2Schema(legacyDb);
-    const closed = legacyDb.prepare("SELECT lifecycle_state,hold_reason FROM mission WHERE id=1").get();
-    assert.deepEqual(closed, { lifecycle_state: "cancelled", hold_reason: "migration_superseded" });
-    const event = legacyDb.prepare(`SELECT event_type,before_json,after_json,detail_json
-      FROM mission_event WHERE mission_id=1 AND event_type='mission.migration_superseded'`).get();
-    assert.ok(event);
-    assert.equal(JSON.parse(event.before_json).state, "interrupted");
-    assert.equal(JSON.parse(event.after_json).state, "cancelled");
-    assert.equal(JSON.parse(event.detail_json).kept_mission_id, 2);
-    legacyDb.close();
-  });
-
-  it("retires pending commands and clears terminal pointers when deduplicating open missions", () => {
-    const legacyDb = new Database(":memory:");
-    legacyDb.pragma("foreign_keys = ON");
-    legacyDb.exec(`
-      CREATE TABLE course (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-      CREATE TABLE cone (
-        id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, lat REAL NOT NULL,
-        lng REAL NOT NULL, alt REAL, side TEXT NOT NULL,
-        FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE CASCADE
-      );
-      CREATE TABLE mission (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, started_at INTEGER NOT NULL,
-        ended_at INTEGER, status TEXT NOT NULL DEFAULT 'running', waypoints_json TEXT NOT NULL,
-        current_waypoint_idx INTEGER NOT NULL DEFAULT 0, spray_results_json TEXT NOT NULL DEFAULT '{}',
-        updated_at INTEGER, actor TEXT,
-        FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE SET NULL
-      );
-      INSERT INTO course (id,name) VALUES (1,'Legacy pending duplicates');
-      INSERT INTO mission (id,course_id,started_at,status,waypoints_json)
-        VALUES (1,1,1000,'running','[{"lat":35,"lng":126}]');
-      INSERT INTO mission (id,course_id,started_at,status,waypoints_json)
-        VALUES (2,1,2000,'paused','[{"lat":35.1,"lng":126.1}]');
-    `);
-    setupMissionV2Schema(legacyDb);
-
-    legacyDb.exec("DROP INDEX idx_mission_one_active");
-    legacyDb.prepare(`UPDATE mission SET protocol_version=2,lifecycle_state='interrupted',
-      status='interrupted',active_command_id=?,active_hold_id=? WHERE id=1`)
-      .run("migration-pending", "migration-hold");
-    legacyDb.prepare(`INSERT INTO mission_command
-      (id,mission_id,command_seq,action,state,requested_at,payload_json)
-      VALUES (?,?,1,'pause','pending',3000,'{}')`).run("migration-pending", 1);
-    setupMissionV2Schema(legacyDb);
-
-    assert.deepEqual(
-      legacyDb.prepare(`SELECT lifecycle_state,active_command_id,active_hold_id
-        FROM mission WHERE id=1`).get(),
-      { lifecycle_state: "cancelled", active_command_id: null, active_hold_id: null },
-    );
-    assert.deepEqual(
-      legacyDb.prepare("SELECT state,reject_reason FROM mission_command WHERE id='migration-pending'").get(),
-      { state: "superseded", reject_reason: "migration_superseded" },
-    );
-    const commandEvent = legacyDb.prepare(`SELECT detail_json FROM mission_event
-      WHERE mission_id=1 AND command_id='migration-pending' AND event_type='command.superseded'`).get();
-    assert.equal(JSON.parse(commandEvent.detail_json).reason, "migration_superseded");
-    const closeEvent = legacyDb.prepare(`SELECT before_json,after_json,detail_json FROM mission_event
-      WHERE mission_id=1 AND event_type='mission.migration_superseded' ORDER BY id DESC`).get();
-    assert.equal(JSON.parse(closeEvent.before_json).active_command_id, "migration-pending");
-    assert.equal(JSON.parse(closeEvent.after_json).active_command_id, null);
-    assert.deepEqual(JSON.parse(closeEvent.detail_json).retired_pending_command_ids, ["migration-pending"]);
-    legacyDb.close();
-  });
-
-  it("promotes an open legacy route to a valid resumable v2 plan", () => {
-    const legacyDb = new Database(":memory:");
-    legacyDb.pragma("foreign_keys = ON");
-    legacyDb.exec(`
-      CREATE TABLE course (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE);
-      CREATE TABLE cone (
-        id INTEGER PRIMARY KEY, course_id INTEGER NOT NULL, lat REAL NOT NULL,
-        lng REAL NOT NULL, alt REAL, side TEXT NOT NULL,
-        FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE CASCADE
-      );
-      CREATE TABLE mission (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, course_id INTEGER, started_at INTEGER NOT NULL,
-        ended_at INTEGER, status TEXT NOT NULL DEFAULT 'running', waypoints_json TEXT NOT NULL,
-        current_waypoint_idx INTEGER NOT NULL DEFAULT 0, spray_results_json TEXT NOT NULL DEFAULT '{}',
-        updated_at INTEGER, actor TEXT,
-        FOREIGN KEY (course_id) REFERENCES course(id) ON DELETE SET NULL
-      );
-      INSERT INTO course (id,name) VALUES (1,'Legacy');
-    `);
-    legacyDb.prepare(`INSERT INTO mission
-      (course_id,started_at,status,waypoints_json,current_waypoint_idx,spray_results_json)
-      VALUES (1,?,'running',?,1,?)`).run(
-      1000,
-      JSON.stringify([
-        { lat: 35, lng: 126 },
-        { lat: 35.00001, lng: 126.00001 },
-        { lat: 35.00002, lng: 126.00002 },
-      ]),
-      JSON.stringify({ 0: "success" }),
-    );
-
-    setupMissionV2Schema(legacyDb);
-    const store = createMissionV2Store(legacyDb);
-    const promoted = store.activeMission();
-    assert.equal(promoted.protocol_version, 2);
-    assert.match(promoted.plan_hash, /^[a-f0-9]{64}$/);
-    assert.equal(promoted.status, "interrupted");
-    assert.deepEqual(promoted.waypoints.map((waypoint) => waypoint.state), [
-      "completed", "pending", "pending",
-    ]);
-    const held = store.applyReport({
-      mission_id: promoted.id,
-      plan_hash: promoted.plan_hash,
-      boot_id: "boot-after-upgrade",
-      event: "state",
-      motion_state: "held",
-      completed_waypoint_ids: [promoted.waypoints[0].id],
-    });
-    const resumed = store.issueCommand({
-      missionId: held.id,
-      action: "resume",
-      expectedPlanHash: held.plan_hash,
-      expectedOccurrenceRevision: held.occurrence_revision,
-      targetBootId: "boot-after-upgrade",
-    });
-    const payload = JSON.parse(resumed.command.payload_json);
-    assert.equal(payload.plan_hash, promoted.plan_hash);
-    assert.deepEqual(payload.waypoints.map((waypoint) => waypoint.id), [
-      "legacy-1-1", "legacy-1-2",
-    ]);
-    legacyDb.close();
   });
 });

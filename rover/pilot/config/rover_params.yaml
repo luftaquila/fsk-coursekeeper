@@ -1,8 +1,10 @@
 bridge_node:
   ros__parameters:
-    server_url: ""                     # Course server URL (e.g., https://test.luftaquila.io/course). MUST be https.
-    # internal_secret is injected via INTERNAL_SECRET env var; never commit.
-    # server_url_allow_http defaults to false. Only set true on trusted internal (e.g. Tailscale) networks.
+    server_url: "http://127.0.0.1:10100"  # Rover hub on this Pi (localhost-only device port). The SERVER_URL launch argument overrides it when non-empty.
+    # Plain http is accepted only for loopback hosts (127.0.0.1, ::1, localhost);
+    # any other host must be https unless server_url_allow_http is true.
+    # INTERNAL_SECRET / ROVER_SECRET env vars are optional and sent as headers
+    # only when set; the hub ignores them. Never commit them here.
     server_url_allow_http: false
     position_report_interval: 1.0      # Seconds between position reports (always, even when idle)
     sse_reconnect_delay: 3.0           # Initial SSE reconnect delay (exponential backoff)

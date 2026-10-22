@@ -1,0 +1,29 @@
+# Rover hub image. Build from the repository root (the pnpm workspace):
+#   podman build -f rover/hub/Containerfile .
+# Run on the rover with --network=host; both APIs bind 127.0.0.1 and the
+# database lives on the /var/lib/fsk-coursekeeper-hub volume.
+
+FROM docker.io/library/node:22-alpine AS build
+# better-sqlite3 falls back to a source build when no prebuilt binary matches.
+RUN apk add --no-cache python3 make g++
+WORKDIR /src
+RUN corepack enable
+# Workspace manifests only, so the dependency layer is cached across source edits.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY course/package.json course/
+COPY rover/hub/package.json rover/hub/
+RUN pnpm install --prod --frozen-lockfile --filter fsk-coursekeeper-hub
+COPY rover/hub/index.mjs rover/hub/
+COPY rover/hub/server rover/hub/server
+
+FROM docker.io/library/node:22-alpine
+ENV NODE_ENV=production \
+    HUB_DB_PATH=/var/lib/fsk-coursekeeper-hub/hub.db
+WORKDIR /app
+# rover/hub/node_modules links into the workspace store under /app/node_modules.
+COPY --from=build /src/node_modules node_modules
+COPY --from=build /src/rover/hub rover/hub
+RUN mkdir -p /var/lib/fsk-coursekeeper-hub
+VOLUME /var/lib/fsk-coursekeeper-hub
+WORKDIR /app/rover/hub
+ENTRYPOINT ["node", "index.mjs"]
