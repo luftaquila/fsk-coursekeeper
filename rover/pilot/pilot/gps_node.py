@@ -8,11 +8,15 @@ Published topics:
     /rover/gps/heading (std_msgs/Float64) - Heading in degrees (only when moving)
     /rover/gps/fix_status (std_msgs/String) - Fix status string
 
+    /rover/gps/metrics (std_msgs/String) - Accuracy/DOP JSON for telemetry
+    /rover/ntrip/status (std_msgs/String) - NTRIP client JSON status (1 Hz)
+
 Subscribed topics:
     /rover/cmd/request_position (std_msgs/Empty) - Trigger immediate position publish
+    /rover/cmd/ntrip_source (std_msgs/String) - Correction source JSON (see
+        parse_ntrip_source): NGII, or a GPS unit's base-station caster
 """
 
-import base64
 import json
 import threading
 import time
@@ -32,16 +36,18 @@ from pilot.lib.ubx_parser import (
 from pilot.lib.ntrip_client import (
     NTRIPClient,
     fetch_source_table,
+    parse_ntrip_source,
     parse_source_table,
     select_nearest_mountpoint,
 )
 
-# NGII (국토지리정보원) is the only NTRIP caster we use. Host, port, and
+# NGII (국토지리정보원) is the default NTRIP caster. Host, port, and
 # password are protocol-level constants published on the gnssdata.or.kr
 # portal — the only per-rover value is the operator's NGII login, which
 # arrives via the NTRIP_USERNAME env var (sourced from the
 # ntrip-username podman secret). Update these constants if NGII ever
-# changes the caster endpoint.
+# changes the caster endpoint. The other source is a GPS unit acting as a
+# base station: its caster address arrives on /rover/cmd/ntrip_source.
 _NTRIP_HOST = 'www.gnssdata.or.kr'
 _NTRIP_PORT = 2101
 _NTRIP_PASSWORD = 'gnss'
@@ -56,6 +62,23 @@ _NTRIP_SETUP_COOLDOWN_S = 30.0
 # retry loop lets pilot.service's Restart=on-failure do less heavy lifting.
 _SERIAL_OPEN_RETRIES = 6
 _SERIAL_OPEN_BACKOFF_S = 2.0
+
+
+NGII_SOURCE = {'source': 'ngii'}
+
+
+def ntrip_setup_due(source, username, has_client, fix_type, now, last_attempt,
+                    cooldown_s=_NTRIP_SETUP_COOLDOWN_S):
+    """Whether to start an NTRIP client now for `source` (parse_ntrip_source).
+
+    Both sources wait for a 3D fix (NGII picks its mountpoint by distance, and
+    both send our position as GGA) and for the setup cooldown. NGII also needs
+    the operator login; a GPS unit's caster takes no credentials."""
+    if has_client or fix_type < FixType.FIX_3D:
+        return False
+    if source['source'] == 'ngii' and not username:
+        return False
+    return now - last_attempt >= cooldown_s
 
 
 def _fix_status_string(pvt):
@@ -92,6 +115,12 @@ CFG_MSGOUT_NMEA_VTG_USB = 0x209100B3
 CFG_RATE_MEAS = 0x30210001
 
 
+def _describe_source(source):
+    if source['source'] == 'caster':
+        return f"caster {source['host']}:{source['port']}/{source['mountpoint']}"
+    return 'NGII'
+
+
 class GpsNode(Node):
 
     def __init__(self):
@@ -115,9 +144,7 @@ class GpsNode(Node):
         # Subscriber for position request
         reliable_qos = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self.create_subscription(Empty, '/rover/cmd/request_position', self._on_request_position, reliable_qos)
-        # Base-station corrections relayed by the server from the GPS receiver
-        # acting as a base (RTCM3, base64), plus the correction-source selector.
-        self.create_subscription(String, '/rover/gps/rtcm_inject', self._on_rtcm_inject, reliable_qos)
+        # Correction-source selector relayed by bridge_node from the rover hub.
         self.create_subscription(String, '/rover/cmd/ntrip_source', self._on_ntrip_source, reliable_qos)
 
         # State
@@ -127,10 +154,9 @@ class GpsNode(Node):
         self._last_dop = None
         self._serial = None
         self._ntrip = None
-        # Correction source: 'ngii' pulls the public NTRIP caster (default);
-        # 'base' consumes RTCM relayed from the receiver base via _on_rtcm_inject
-        # and suppresses NGII auto-setup.
-        self._ntrip_source = 'ngii'
+        # Correction source (parse_ntrip_source shape): NGII by default, or a
+        # GPS unit's base-station caster selected by the hub.
+        self._ntrip_source = dict(NGII_SOURCE)
         self._ntrip_setup_lock = threading.Lock()
         self._ntrip_setup_in_flight = False
         # NTRIP auto-setup is deferred until we have a real 3D fix so we
@@ -161,8 +187,9 @@ class GpsNode(Node):
             )
             self._serial = None
         # NTRIP is started lazily from _read_serial once a 3D fix arrives —
-        # the mountpoint is chosen by nearest distance to the caster's
-        # published base stations, so we need a position first.
+        # the NGII mountpoint is chosen by nearest distance to the caster's
+        # published base stations, so we need a position first (see
+        # ntrip_setup_due).
 
         # Timer for reading serial data
         rate = float(self.get_parameter('publish_rate').value)
@@ -194,60 +221,34 @@ class GpsNode(Node):
         msg.data = json.dumps(status)
         self._pub_ntrip_status.publish(msg)
 
-    def _on_rtcm_inject(self, msg):
-        """Write server-relayed base-station RTCM3 (base64) to the receiver.
-
-        When the operator selects the receiver as the base station, the server
-        relays its RTCM over the rover's command SSE; bridge_node republishes it
-        here. We just feed the bytes to the F9P serial port — exactly what the
-        NGII NTRIP client would have done, minus the network."""
-        if not msg.data or self._serial is None:
-            return
-        # Only inject while the base station is the selected source. In ngii mode
-        # the NTRIP client thread writes the same serial fd; injecting here too
-        # would interleave two writers mid-frame (a stray/out-of-order rtcm event
-        # during the switch boundary). One writer at a time.
-        if self._ntrip_source != 'base':
-            return
-        try:
-            raw = base64.b64decode(msg.data, validate=True)
-        except (ValueError, TypeError) as exc:
-            self.get_logger().warn(f'bad RTCM inject payload: {exc}')
-            return
-        try:
-            self._serial.write(raw)
-        except (serial.SerialException, OSError) as exc:
-            self.get_logger().warn(f'RTCM inject serial write failed: {exc}')
-
     def _on_ntrip_source(self, msg):
-        """Switch correction source: 'base' (relayed RTCM) vs 'ngii' (own NTRIP)."""
-        source = (msg.data or 'ngii').strip()
-        if source not in ('ngii', 'base'):
-            self.get_logger().warn(f'ntrip-source: unknown source {source!r}')
+        """Switch the correction source. Malformed selectors are rejected and
+        the current source is kept."""
+        try:
+            source = parse_ntrip_source(msg.data)
+        except ValueError as exc:
+            self.get_logger().warn(f'ntrip-source: rejected {msg.data!r}: {exc}')
             return
         if source == self._ntrip_source:
             return
-        # Set the source and detach any live NGII client UNDER _ntrip_setup_lock so
-        # this is ordered against _ntrip_setup_worker's lock-held critical section —
-        # otherwise a 'base' flip landing between the worker's source re-check and
-        # its `self._ntrip = client` assignment would leak a live NGII client into
-        # base mode (double-feeding the F9P). Stop the client OUTSIDE the lock so a
-        # multi-second thread join doesn't block the worker.
-        client_to_stop = None
+        # Set the source and detach the live client UNDER _ntrip_setup_lock so
+        # this is ordered against _ntrip_setup_worker's lock-held critical
+        # section — otherwise a switch landing between the worker's source
+        # re-check and its `self._ntrip = client` assignment would leak a client
+        # for the old source (two writers feeding the F9P). Stop the old client
+        # OUTSIDE the lock so its thread join doesn't block the worker.
         with self._ntrip_setup_lock:
             self._ntrip_source = source
-            if source == 'base':
-                client_to_stop = self._ntrip
-                self._ntrip = None
-            else:
-                # Back to NGII — allow immediate re-setup on the next 3D fix.
-                self._ntrip_last_attempt = 0.0
+            client_to_stop = self._ntrip
+            self._ntrip = None
+            # Set up the new source on the next 3D fix, without the cooldown.
+            self._ntrip_last_attempt = 0.0
         if client_to_stop is not None:
             try:
                 client_to_stop.stop()
             except Exception:
                 pass
-        self.get_logger().info(f'NTRIP correction source -> {source}')
+        self.get_logger().info(f'NTRIP correction source -> {_describe_source(source)}')
 
     def _teardown_serial(self):
         """Close NTRIP and the serial port for a clean reopen.
@@ -317,23 +318,18 @@ class GpsNode(Node):
     def _maybe_setup_ntrip(self, pvt):
         """Lazily start the NTRIP client once a real fix is available.
 
-        Mountpoint is auto-selected from the caster's source table as the
-        nearest RTCM 3.2 base station to the current position. On failure
-        (network, empty table, no RTCM 3.2 mount in range) we log and retry
-        after _NTRIP_SETUP_COOLDOWN_S — GPS continues publishing single-
-        precision fixes in the meantime.
+        NGII: the mountpoint is auto-selected from the caster's source table
+        as the nearest RTCM 3.2 base station to the current position. On
+        failure (network, empty table, no RTCM 3.2 mount in range) we log and
+        retry after _NTRIP_SETUP_COOLDOWN_S — GPS continues publishing single-
+        precision fixes in the meantime. Caster: connect straight to the
+        selected GPS unit; NTRIPClient itself reconnects with backoff.
         """
-        if self._ntrip_source == 'base':
-            return  # corrections arrive via _on_rtcm_inject from the receiver base
-        if self._ntrip is not None:
-            return
-        if pvt.fix_type < FixType.FIX_3D:
-            return
+        source = self._ntrip_source
         username = self.get_parameter('ntrip.username').value
-        if not username:
-            return  # NTRIP disabled — no operator login, run without RTK.
         now = time.monotonic()
-        if now - self._ntrip_last_attempt < _NTRIP_SETUP_COOLDOWN_S:
+        if not ntrip_setup_due(source, username, self._ntrip is not None,
+                               pvt.fix_type, now, self._ntrip_last_attempt):
             return
         with self._ntrip_setup_lock:
             if self._ntrip_setup_in_flight:
@@ -345,60 +341,46 @@ class GpsNode(Node):
         gga_interval = self.get_parameter('ntrip.gga_interval_s').value
         threading.Thread(
             target=self._ntrip_setup_worker,
-            args=(pvt.lat, pvt.lon, username, gga_interval, serial_ref),
+            args=(pvt.lat, pvt.lon, source, username, gga_interval, serial_ref),
             daemon=True,
         ).start()
 
-    def _ntrip_setup_worker(self, lat, lon, username, gga_interval, serial_ref):
-        """Fetch source table off the ROS timer thread and start NTRIP."""
+    def _ntrip_setup_worker(self, lat, lon, source, username, gga_interval, serial_ref):
+        """Resolve the caster for `source` off the ROS timer thread and start
+        NTRIP (the NGII source-table fetch can take seconds)."""
         try:
-            # The operator may switch to the receiver base station while this
-            # slow fetch is in flight; bail early so we don't pull NGII at all.
-            if self._ntrip_source == 'base':
+            # The source may switch while this worker is queued or while the
+            # slow fetch is in flight; bail early so we never connect to a
+            # source that is no longer selected.
+            if self._ntrip_source != source:
                 return
-            try:
-                table_text = fetch_source_table(_NTRIP_HOST, _NTRIP_PORT)
-            except Exception as exc:
-                self.get_logger().warn(
-                    f'NTRIP source table fetch failed ({_NTRIP_HOST}:{_NTRIP_PORT}): {exc} '
-                    f'— retry in {_NTRIP_SETUP_COOLDOWN_S:.0f}s'
-                )
-                return
-
-            entries = parse_source_table(table_text)
-            if not entries:
-                self.get_logger().warn(
-                    f'NTRIP source table from {_NTRIP_HOST}:{_NTRIP_PORT} had no parseable STR entries '
-                    f'— retry in {_NTRIP_SETUP_COOLDOWN_S:.0f}s'
-                )
-                return
-
-            mount = select_nearest_mountpoint(lat, lon, entries)
-            if not mount:
-                self.get_logger().warn(
-                    f'NTRIP: no RTCM 3.2 mountpoint in source table of {len(entries)} entries '
-                    f'— retry in {_NTRIP_SETUP_COOLDOWN_S:.0f}s'
-                )
-                return
+            if source['source'] == 'caster':
+                host, port, mount = source['host'], source['port'], source['mountpoint']
+                user, password = '', ''
+            else:
+                host, port, user, password = _NTRIP_HOST, _NTRIP_PORT, username, _NTRIP_PASSWORD
+                mount = self._select_ngii_mount(lat, lon)
+                if not mount:
+                    return
 
             with self._ntrip_setup_lock:
-                # Re-check the source UNDER the lock: if we switched to base after
-                # the early check but during the fetch, _on_ntrip_source('base')
-                # couldn't stop a client that didn't exist yet — abort here so we
-                # never start NGII in base mode (which would double-feed the F9P).
+                # Re-check the source UNDER the lock: if it switched after the
+                # early check, _on_ntrip_source couldn't stop a client that
+                # didn't exist yet — abort here so a stale source never starts
+                # (which would double-feed the F9P).
                 if (self._ntrip is not None or self._serial is not serial_ref
-                        or self._ntrip_source == 'base'):
+                        or self._ntrip_source != source):
                     return
                 self.get_logger().info(
-                    f'NTRIP: auto-selected "{mount}" for position '
-                    f'({lat:.5f}, {lon:.5f})'
+                    f'NTRIP: connecting to {host}:{port}/{mount} '
+                    f'({_describe_source(source)}) for position ({lat:.5f}, {lon:.5f})'
                 )
                 client = NTRIPClient(
-                    host=_NTRIP_HOST,
-                    port=_NTRIP_PORT,
+                    host=host,
+                    port=port,
                     mountpoint=mount,
-                    username=username,
-                    password=_NTRIP_PASSWORD,
+                    username=user,
+                    password=password,
                     serial_port=serial_ref,
                     lat=lat,
                     lon=lon,
@@ -410,6 +392,33 @@ class GpsNode(Node):
         finally:
             with self._ntrip_setup_lock:
                 self._ntrip_setup_in_flight = False
+
+    def _select_ngii_mount(self, lat, lon):
+        """Nearest NGII RTCM 3.2 mountpoint, or None (logged; retried after the cooldown)."""
+        try:
+            table_text = fetch_source_table(_NTRIP_HOST, _NTRIP_PORT)
+        except Exception as exc:
+            self.get_logger().warn(
+                f'NTRIP source table fetch failed ({_NTRIP_HOST}:{_NTRIP_PORT}): {exc} '
+                f'— retry in {_NTRIP_SETUP_COOLDOWN_S:.0f}s'
+            )
+            return None
+
+        entries = parse_source_table(table_text)
+        if not entries:
+            self.get_logger().warn(
+                f'NTRIP source table from {_NTRIP_HOST}:{_NTRIP_PORT} had no parseable STR entries '
+                f'— retry in {_NTRIP_SETUP_COOLDOWN_S:.0f}s'
+            )
+            return None
+
+        mount = select_nearest_mountpoint(lat, lon, entries)
+        if not mount:
+            self.get_logger().warn(
+                f'NTRIP: no RTCM 3.2 mountpoint in source table of {len(entries)} entries '
+                f'— retry in {_NTRIP_SETUP_COOLDOWN_S:.0f}s'
+            )
+        return mount
 
     def _read_serial(self):
         """Read and parse UBX data from serial port.

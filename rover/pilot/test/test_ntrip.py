@@ -121,6 +121,8 @@ def test_stale_stream_forces_reconnect():
             raise socket.timeout()
         def sendall(self, _d):
             pass
+        def shutdown(self, _how):
+            pass
         def close(self):
             pass
 
@@ -214,3 +216,74 @@ def test_fetch_source_table_caps_runaway_stream(monkeypatch):
     monkeypatch.setattr(nc.socket, "create_connection", lambda *a, **k: _FloodSock())
     with pytest.raises(ValueError):
         nc.fetch_source_table("host.invalid", 2101, max_bytes=64 * 1024)
+
+
+# ---- correction-source selector ---------------------------------------------
+
+from pilot.lib.ntrip_client import parse_ntrip_source  # noqa: E402
+
+_CASTER = {"source": "caster", "host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"}
+
+
+def test_parse_ntrip_source_ngii_from_dict_and_json():
+    assert parse_ntrip_source({"source": "ngii", "extra": 1}) == {"source": "ngii"}
+    assert parse_ntrip_source('{"source":"ngii"}') == {"source": "ngii"}
+
+
+def test_parse_ntrip_source_caster_drops_unknown_keys():
+    import json
+    assert parse_ntrip_source(json.dumps({**_CASTER, "x": True})) == _CASTER
+    assert parse_ntrip_source({**_CASTER, "host": "fsk-coursekeeper-gps"})["host"] == "fsk-coursekeeper-gps"
+
+
+@pytest.mark.parametrize("value", [
+    "not json", "[1]", '"ngii"', {"source": "base"}, {},
+    {**_CASTER, "host": ""},
+    {**_CASTER, "host": "evil\r\nX-Injected: 1"},
+    {**_CASTER, "host": "fd7a::1"},
+    {**_CASTER, "port": "2101"},
+    {**_CASTER, "port": True},
+    {**_CASTER, "port": 0},
+    {**_CASTER, "port": 65536},
+    {**_CASTER, "mountpoint": ""},
+    {**_CASTER, "mountpoint": "A B"},
+    {**_CASTER, "mountpoint": "../x HTTP/1.1"},
+])
+def test_parse_ntrip_source_rejects(value):
+    with pytest.raises(ValueError):
+        parse_ntrip_source(value)
+
+
+def test_stop_wakes_a_blocked_recv():
+    """stop() must interrupt the worker's recv() instead of waiting out the
+    5 s socket timeout (gps_node stops the old client on every source switch)."""
+    import socket
+    import threading
+    import time
+
+    server = socket.socket()
+    server.bind(("127.0.0.1", 0))
+    server.listen(1)
+    accepted = []
+
+    def _serve():
+        conn, _ = server.accept()
+        accepted.append(conn)
+        while b"\r\n\r\n" not in conn.recv(4096):
+            pass
+        conn.sendall(b"HTTP/1.1 200 OK\r\n\r\n")  # then stay silent
+
+    threading.Thread(target=_serve, daemon=True).start()
+    c = NTRIPClient(host="127.0.0.1", port=server.getsockname()[1], mountpoint="M",
+                    username="", password="", serial_port=_DummySerial())
+    c.start()
+    deadline = time.monotonic() + 3
+    while not c.connected and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert c.connected
+    t0 = time.monotonic()
+    c.stop()
+    assert time.monotonic() - t0 < 2.0
+    for conn in accepted:
+        conn.close()
+    server.close()

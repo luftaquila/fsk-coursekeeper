@@ -5,6 +5,8 @@ which are then written to the GPS receiver serial port.
 """
 
 import base64
+import json
+import re
 import socket
 import threading
 import time
@@ -38,7 +40,7 @@ def fetch_source_table(host, port, timeout=10.0,
             f"GET / HTTP/1.1\r\n"
             f"Host: {host}:{port}\r\n"
             f"Ntrip-Version: Ntrip/2.0\r\n"
-            f"User-Agent: NTRIP FSKRover/1.0\r\n"
+            f"User-Agent: NTRIP FSKCoursekeeper/1.0\r\n"
             f"Connection: close\r\n"
             f"\r\n"
         )
@@ -110,6 +112,44 @@ def select_nearest_mountpoint(lat, lon, entries, format_prefix="RTCM 3.2"):
             best_mount = e["mount"]
             best_dist = d
     return best_mount
+
+# Correction-source selector sent by the rover hub (SSE `ntrip-source`, then
+# /rover/cmd/ntrip_source). Values end up in an NTRIP request line, so only
+# hostname/IPv4 and mountpoint characters are accepted.
+_SOURCE_HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
+_SOURCE_MOUNTPOINT_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+
+
+def parse_ntrip_source(value):
+    """Validate a correction-source selector (a dict or its JSON text).
+
+    Returns ``{"source": "ngii"}`` (public NGII caster, nearest mountpoint) or
+    ``{"source": "caster", "host", "port", "mountpoint"}`` (a GPS unit's base
+    caster). Raises ValueError naming the problem; unknown keys are dropped.
+    """
+    if isinstance(value, (str, bytes)):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            raise ValueError("not valid JSON")
+    if not isinstance(value, dict):
+        raise ValueError("not a JSON object")
+    source = value.get("source")
+    if source == "ngii":
+        return {"source": "ngii"}
+    if source != "caster":
+        raise ValueError(f"unknown source {source!r}")
+    host = value.get("host")
+    port = value.get("port")
+    mountpoint = value.get("mountpoint")
+    if not isinstance(host, str) or not _SOURCE_HOST_RE.match(host):
+        raise ValueError(f"invalid caster host {host!r}")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise ValueError(f"invalid caster port {port!r}")
+    if not isinstance(mountpoint, str) or not _SOURCE_MOUNTPOINT_RE.match(mountpoint):
+        raise ValueError(f"invalid caster mountpoint {mountpoint!r}")
+    return {"source": "caster", "host": host, "port": port, "mountpoint": mountpoint}
+
 
 GGA_TEMPLATE = (
     "$GPGGA,{time},{lat},{lat_dir},{lon},{lon_dir},1,12,1.0,0.0,M,0.0,M,,"
@@ -253,9 +293,16 @@ class NTRIPClient:
         # Wake any thread blocked in the reconnect backoff so the join()
         # below returns promptly rather than waiting up to the cap (300 s).
         self._stop_event.set()
-        if self._sock:
+        sock = self._sock
+        if sock:
+            # shutdown() wakes a recv() blocked in the worker thread; close()
+            # alone leaves it waiting out the socket timeout before join().
             try:
-                self._sock.close()
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
             except Exception:
                 pass
         if self._thread:
@@ -276,7 +323,7 @@ class NTRIPClient:
             f"GET /{self._mountpoint} HTTP/1.1\r\n"
             f"Host: {self._host}\r\n"
             f"Ntrip-Version: Ntrip/2.0\r\n"
-            f"User-Agent: NTRIP FSKRover/1.0\r\n"
+            f"User-Agent: NTRIP FSKCoursekeeper/1.0\r\n"
             f"Authorization: Basic {auth}\r\n"
             f"Ntrip-GGA: {gga.strip()}\r\n"
             f"\r\n"

@@ -11,8 +11,7 @@ Published topics:
     /rover/cmd/resume (std_msgs/Empty) - Mission resume from server
     /rover/cmd/manual_control (geometry_msgs/Twist) - Manual joystick from server
     /rover/cmd/request_position (std_msgs/Empty) - Position request from server
-    /rover/gps/rtcm_inject (std_msgs/String) - Base-station RTCM3 (base64) from server
-    /rover/cmd/ntrip_source (std_msgs/String) - Correction source selector (ngii|base)
+    /rover/cmd/ntrip_source (std_msgs/String) - Correction source JSON (ngii | caster host/port/mountpoint)
 
 Subscribed topics:
     /rover/gps/position (sensor_msgs/NavSatFix) - GPS position to report to server
@@ -46,6 +45,7 @@ except ImportError:
     HAS_ROSOUT = False
 
 from pilot.lib.protocol_utils import assemble_sse_data
+from pilot.lib.ntrip_client import parse_ntrip_source
 from pilot.lib.antenna_calibration import load_antenna_offset
 from pilot.lib.wheel_calibration import load_wheel_cal
 from pilot.lib.steering_calibration import load_steering_trim
@@ -164,9 +164,7 @@ class BridgeNode(Node):
         self._pub_pump_duration = self.create_publisher(Float32, '/rover/cmd/pump_duration', reliable_qos)
         self._pub_nav_lights = self.create_publisher(Int32, '/rover/cmd/nav_lights', reliable_qos)
         self._pub_led_brightness = self.create_publisher(Int32, '/rover/cmd/led_brightness', reliable_qos)
-        # Base-station corrections relayed from the server: RTCM3 (base64) to feed
-        # the GPS receiver, and the NGII-vs-base correction-source selector.
-        self._pub_rtcm_inject = self.create_publisher(String, '/rover/gps/rtcm_inject', reliable_qos)
+        # Correction-source selector (NGII or a GPS unit's base caster) → gps_node.
         self._pub_ntrip_source = self.create_publisher(String, '/rover/cmd/ntrip_source', reliable_qos)
 
         # Subscribers
@@ -284,7 +282,7 @@ class BridgeNode(Node):
             return
 
         # msg.altitude is MSL height (gps_node sets it from NAV-PVT h_msl), same
-        # datum as the gps-register rover — keep it bound to this fix so the cone
+        # datum as the GPS unit's cone capture — keep it bound to this fix so the cone
         # gets lat/lng/alt from a single GPS solution.
         self._last_position = {'lat': msg.latitude, 'lng': msg.longitude, 'alt': msg.altitude}
 
@@ -846,8 +844,7 @@ class BridgeNode(Node):
         THAT event. An uncaught exception here would propagate up through
         _connect_sse's iter_lines loop and tear down the whole SSE command
         channel (including E-Stop / clear-emergency), forcing a full
-        reconnect and leaving the rover briefly uncommandable. Mirrors the
-        per-event isolation gps_register.py applies to its SSE handler.
+        reconnect and leaving the rover briefly uncommandable.
         """
         try:
             payload = json.loads(data) if data else {}
@@ -1010,22 +1007,15 @@ class BridgeNode(Node):
             msg.data = brightness
             self._pub_led_brightness.publish(msg)
 
-        elif event == 'rtcm':
-            # Base-station RTCM3 (base64) relayed from the receiver → gps_node.
-            data = payload.get('data')
-            if isinstance(data, str) and data:
-                msg = String()
-                msg.data = data
-                self._pub_rtcm_inject.publish(msg)
-
         elif event == 'ntrip-source':
-            source = payload.get('source')
-            if source in ('ngii', 'base'):
-                msg = String()
-                msg.data = source
-                self._pub_ntrip_source.publish(msg)
-            else:
-                self.get_logger().warn(f'ntrip-source: bad payload {payload!r}')
+            try:
+                source = parse_ntrip_source(payload)
+            except ValueError as exc:
+                self.get_logger().warn(f'ntrip-source: bad payload {payload!r}: {exc}')
+                return
+            msg = String()
+            msg.data = json.dumps(source, separators=(',', ':'))
+            self._pub_ntrip_source.publish(msg)
 
         elif event == 'fetch-logs':
             # Upload on a worker thread so the SSE reader loop stays responsive.

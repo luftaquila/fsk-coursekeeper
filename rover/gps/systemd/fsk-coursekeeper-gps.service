@@ -1,0 +1,24 @@
+[Unit]
+Description=FSK Coursekeeper GPS unit (ZED-F9P RTK, HTTP API, NTRIP caster)
+Documentation=https://github.com/luftaquila/fsk-coursekeeper
+# NGII corrections need the network; the agent retries forever, but ordering
+# after the network keeps the journal clean on boot.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Written by scripts/provision-gps.sh (0600, root-owned: holds the NGII login).
+EnvironmentFile=/etc/fsk-coursekeeper-gps/gps.conf
+WorkingDirectory=/opt/fsk-coursekeeper-gps
+ExecStart=/usr/bin/python3 /opt/fsk-coursekeeper-gps/gps_register.py
+# Survey points + selected mode (STATE_DIR default).
+StateDirectory=fsk-coursekeeper-gps
+StateDirectoryMode=0700
+# Runs as root: reads the 0600 config and the dialout serial node.
+# Single-purpose device.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

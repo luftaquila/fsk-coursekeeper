@@ -1,14 +1,20 @@
-"""Tests for gps_node correction-source switching + RTCM injection.
+"""Tests for gps_node correction-source selection (NGII vs a GPS unit's caster).
 
 Relies on the ROS/hardware stubs installed by conftest.py.
 """
 
-import base64
+import json
+import threading
 from types import SimpleNamespace
 
+import pytest
+
 from std_msgs.msg import String
-from pilot.gps_node import GpsNode
+import pilot.gps_node as gps_node_mod
+from pilot.gps_node import GpsNode, NGII_SOURCE, ntrip_setup_due
 from pilot.lib.ubx_parser import FixType
+
+CASTER = {"source": "caster", "host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"}
 
 
 class _CapturingSerial:
@@ -27,6 +33,19 @@ class _CapturingSerial:
         pass
 
 
+class _FakeClient:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.started = False
+        self.stopped = False
+
+    def start(self):
+        self.started = True
+
+    def stop(self):
+        self.stopped = True
+
+
 def _node():
     node = GpsNode()
     node._serial = _CapturingSerial()
@@ -35,119 +54,151 @@ def _node():
 
 def _msg(data):
     m = String()
-    m.data = data
+    m.data = data if isinstance(data, str) else json.dumps(data)
     return m
 
 
-def test_default_source_is_ngii():
-    assert _node()._ntrip_source == "ngii"
+def _pvt(fix_type=FixType.FIX_3D):
+    return SimpleNamespace(fix_type=fix_type, lat=37.5, lon=127.0)
 
 
-def test_switch_to_base_suppresses_ngii_setup():
-    node = _node()
-    node._on_ntrip_source(_msg("base"))
-    assert node._ntrip_source == "base"
-    # With base selected, NTRIP auto-setup must NOT start even at a 3D fix.
-    node._ntrip = None
-    node._maybe_setup_ntrip(SimpleNamespace(fix_type=FixType.FIX_3D, lat=37.5, lon=127.0))
-    assert node._ntrip is None
+class TestSetupDecision:
+    def test_waits_for_3d_fix(self):
+        assert not ntrip_setup_due(CASTER, "", False, FixType.FIX_2D, 100.0, 0.0)
+        assert ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 0.0)
+
+    def test_ngii_needs_username_caster_does_not(self):
+        assert not ntrip_setup_due(NGII_SOURCE, "", False, FixType.FIX_3D, 100.0, 0.0)
+        assert ntrip_setup_due(NGII_SOURCE, "user", False, FixType.FIX_3D, 100.0, 0.0)
+        assert ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 0.0)
+
+    def test_existing_client_or_cooldown_blocks(self):
+        assert not ntrip_setup_due(CASTER, "", True, FixType.FIX_3D, 100.0, 0.0)
+        assert not ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 90.0, cooldown_s=30.0)
+        assert ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 70.0, cooldown_s=30.0)
 
 
-def test_switch_back_to_ngii_resets_retry():
-    node = _node()
-    node._on_ntrip_source(_msg("base"))
-    node._ntrip_last_attempt = 12345.0
-    node._on_ntrip_source(_msg("ngii"))
-    assert node._ntrip_source == "ngii"
-    assert node._ntrip_last_attempt == 0.0
+class TestSourceSwitch:
+    def test_default_source_is_ngii(self):
+        assert _node()._ntrip_source == {"source": "ngii"}
+
+    def test_switch_to_caster(self):
+        node = _node()
+        node._ntrip_last_attempt = 12345.0
+        node._on_ntrip_source(_msg(CASTER))
+        assert node._ntrip_source == CASTER
+        assert node._ntrip_last_attempt == 0.0
+
+    @pytest.mark.parametrize("data", [
+        "garbage", '"ngii"', '{"source": "base"}',
+        json.dumps({**CASTER, "port": "2101"}),
+        json.dumps({**CASTER, "mountpoint": "A B"}),
+        json.dumps({"source": "caster", "port": 2101, "mountpoint": "FSKBASE"}),
+    ])
+    def test_malformed_selector_keeps_current_source(self, data):
+        node = _node()
+        node._on_ntrip_source(_msg(CASTER))
+        node._on_ntrip_source(_msg(data))
+        assert node._ntrip_source == CASTER
+
+    def test_switch_stops_the_existing_client(self):
+        node = _node()
+        client = _FakeClient()
+        node._ntrip = client
+        node._on_ntrip_source(_msg(CASTER))
+        assert client.stopped is True and node._ntrip is None
+
+    def test_switch_between_casters_stops_the_old_one(self):
+        node = _node()
+        node._on_ntrip_source(_msg(CASTER))
+        client = _FakeClient()
+        node._ntrip = client
+        node._on_ntrip_source(_msg({**CASTER, "host": "100.64.0.8"}))
+        assert client.stopped is True and node._ntrip is None
+        assert node._ntrip_source["host"] == "100.64.0.8"
+
+    def test_same_source_keeps_the_client(self):
+        node = _node()
+        node._on_ntrip_source(_msg(CASTER))
+        client = _FakeClient()
+        node._ntrip = client
+        node._on_ntrip_source(_msg(dict(CASTER)))
+        assert client.stopped is False and node._ntrip is client
 
 
-def test_unknown_source_ignored():
-    node = _node()
-    node._on_ntrip_source(_msg("garbage"))
-    assert node._ntrip_source == "ngii"
+class TestSetupWorker:
+    def test_caster_connects_without_credentials_or_sourcetable(self, monkeypatch):
+        node = _node()
+        node._on_ntrip_source(_msg(CASTER))
 
+        def _boom(*_a, **_kw):
+            raise AssertionError("caster source must not fetch a source table")
 
-def _base_node():
-    """A node with the base station selected (RTCM injection is only accepted
-    while base is the source; ngii mode is served by the NTRIP client)."""
-    node = _node()
-    node._ntrip_source = "base"
-    return node
+        monkeypatch.setattr(gps_node_mod, "fetch_source_table", _boom)
+        monkeypatch.setattr(gps_node_mod, "NTRIPClient", _FakeClient)
+        node._ntrip_setup_worker(37.5, 127.0, node._ntrip_source, "", 10.0, node._serial)
+        client = node._ntrip
+        assert client.started is True
+        assert client.kwargs["host"] == "100.64.0.7" and client.kwargs["port"] == 2101
+        assert client.kwargs["mountpoint"] == "FSKBASE"
+        assert client.kwargs["username"] == "" and client.kwargs["password"] == ""
+        assert client.kwargs["serial_port"] is node._serial
+        assert node._ntrip_setup_in_flight is False
 
+    def test_ngii_uses_the_nearest_mountpoint(self, monkeypatch):
+        node = _node()
+        table = "STR;NEAR;x;RTCM 3.2;;;;;;37.50;127.00;\r\nSTR;FAR;x;RTCM 3.2;;;;;;35.00;129.00;\r\n"
+        monkeypatch.setattr(gps_node_mod, "fetch_source_table", lambda *_a, **_kw: table)
+        monkeypatch.setattr(gps_node_mod, "NTRIPClient", _FakeClient)
+        node._ntrip_setup_worker(37.5, 127.0, node._ntrip_source, "user", 10.0, node._serial)
+        assert node._ntrip.kwargs["mountpoint"] == "NEAR"
+        assert node._ntrip.kwargs["username"] == "user"
+        assert node._ntrip.kwargs["password"] == "gnss"
 
-def test_rtcm_inject_writes_decoded_bytes_to_serial():
-    node = _base_node()
-    raw = bytes([0xD3, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22])
-    node._on_rtcm_inject(_msg(base64.b64encode(raw).decode("ascii")))
-    assert node._serial.written == raw
+    def test_worker_aborts_when_source_switched(self, monkeypatch):
+        # A worker started for NGII must not connect once the source moved to a
+        # caster (and must return before the slow network fetch).
+        node = _node()
+        stale = node._ntrip_source
+        node._on_ntrip_source(_msg(CASTER))
 
+        def _boom(*_a, **_kw):
+            raise AssertionError("must not fetch for a stale source")
 
-def test_rtcm_inject_dropped_in_ngii_mode():
-    # Default source is ngii → the NTRIP client owns the serial fd; an inject
-    # must be dropped so two threads don't write it concurrently.
-    node = _node()
-    assert node._ntrip_source == "ngii"
-    raw = bytes([0xD3, 0x00, 0x04, 0xDE, 0xAD, 0xBE, 0xEF, 0x11, 0x22])
-    node._on_rtcm_inject(_msg(base64.b64encode(raw).decode("ascii")))
-    assert node._serial.written == b""
+        monkeypatch.setattr(gps_node_mod, "fetch_source_table", _boom)
+        node._ntrip_setup_worker(37.5, 127.0, stale, "user", 10.0, node._serial)
+        assert node._ntrip is None
 
+    def test_switch_during_fetch_is_not_overridden(self, monkeypatch):
+        node = _node()
+        stale = node._ntrip_source
 
-def test_rtcm_inject_bad_base64_is_ignored():
-    node = _base_node()
-    node._on_rtcm_inject(_msg("!!!not base64!!!"))
-    assert node._serial.written == b""
+        def _fetch(*_a, **_kw):
+            node._on_ntrip_source(_msg(CASTER))  # switch lands mid-fetch
+            return "STR;NEAR;x;RTCM 3.2;;;;;;37.50;127.00;\r\n"
 
+        monkeypatch.setattr(gps_node_mod, "fetch_source_table", _fetch)
+        monkeypatch.setattr(gps_node_mod, "NTRIPClient", _FakeClient)
+        node._ntrip_setup_worker(37.5, 127.0, stale, "user", 10.0, node._serial)
+        assert node._ntrip is None
 
-def test_rtcm_inject_lenient_garbage_is_rejected():
-    # 'ab!!cd' reduces to 'abcd' under the lenient decoder but is rejected with
-    # validate=True, so stray bytes never reach the F9P.
-    node = _base_node()
-    node._on_rtcm_inject(_msg("ab!!cd"))
-    assert node._serial.written == b""
+    def test_maybe_setup_spawns_caster_without_username(self, monkeypatch):
+        node = _node()
+        node._on_ntrip_source(_msg(CASTER))
+        done = threading.Event()
 
+        def _client(**kwargs):
+            done.set()
+            return _FakeClient(**kwargs)
 
-def test_rtcm_inject_empty_is_noop():
-    node = _base_node()
-    node._on_rtcm_inject(_msg(""))
-    assert node._serial.written == b""
+        monkeypatch.setattr(gps_node_mod, "NTRIPClient", _client)
+        node._maybe_setup_ntrip(_pvt())
+        assert done.wait(2.0)
 
-
-def test_rtcm_inject_no_serial_is_noop():
-    node = _base_node()
-    node._serial = None
-    node._on_rtcm_inject(_msg("3q2+7w=="))  # valid base64, but no port to write to
-    # No exception; nothing to assert beyond "did not raise".
-
-
-def test_switch_to_base_stops_existing_ngii_client():
-    node = _node()
-
-    class _FakeClient:
-        def __init__(self): self.stopped = False
-        def stop(self): self.stopped = True
-
-    client = _FakeClient()
-    node._ntrip = client
-    node._on_ntrip_source(_msg("base"))
-    assert node._ntrip_source == "base"
-    assert client.stopped is True
-    assert node._ntrip is None
-
-
-def test_ntrip_setup_worker_aborts_in_base_mode(monkeypatch):
-    # If the operator switched to base, the NGII setup worker must not start a
-    # client (and must early-return before any network fetch).
-    node = _node()
-    node._ntrip_source = "base"
-    node._ntrip = None
-    called = {"fetch": False}
-
-    def _boom(*_a, **_kw):
-        called["fetch"] = True
-        raise AssertionError("must not fetch the source table in base mode")
-
-    monkeypatch.setattr("pilot.gps_node.fetch_source_table", _boom)
-    node._ntrip_setup_worker(37.5, 127.0, "user", 10.0, node._serial)
-    assert node._ntrip is None
-    assert called["fetch"] is False
+    def test_maybe_setup_skips_ngii_without_username(self):
+        node = _node()
+        node._maybe_setup_ntrip(_pvt())
+        # No worker was spawned: the attempt bookkeeping is untouched.
+        assert node._ntrip_setup_in_flight is False
+        assert node._ntrip_last_attempt == 0.0
+        assert node._ntrip is None

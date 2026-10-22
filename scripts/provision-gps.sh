@@ -1,34 +1,49 @@
 #!/bin/sh
-# Provision the FSK GPS-registration unit (Raspberry Pi Zero 2 W) from the
+# Provision the FSK Coursekeeper GPS unit (Raspberry Pi Zero 2 W) from the
 # admin machine. Counterpart to provision-rover.sh, but the GPS unit runs
 # Raspberry Pi OS Lite (cloud-init headless), not the AlmaLinux bootc host —
-# so this script also DEPLOYS the agent code, not just secrets.
+# so this script also DEPLOYS the agent code.
 #
 # Usage:
 #   scripts/provision-gps.sh <host> [--ntrip-username=<id>] \
-#       [--tailscale-authkey=<tskey-...>]
+#       [--allowed-origins=<origin,...>] [--tailscale-authkey=<tskey-...>]
 #
 # What it does (idempotent):
-#   1. tars the gps agent + the reused pilot.lib.* modules and copies them in,
-#   2. apt-installs python3-serial / python3-requests and Tailscale,
-#   3. installs /opt/gps-register, the systemd unit, and the udev rule,
-#   4. writes /etc/gps-register/gps.conf (SERVER_URL + INTERNAL_SECRET +
-#      NTRIP_USERNAME) 0600 root, sourced from the repo's .env,
-#   5. brings Tailscale up if an auth key was given,
-#   6. enables + restarts gps-register.service and verifies it stays active.
+#   1. tars the GPS agent + the reused pilot.lib.* modules and copies them in,
+#   2. apt-installs python3-serial and Tailscale,
+#   3. sets the hostname to fsk-coursekeeper-gps,
+#   4. installs /opt/fsk-coursekeeper-gps, the systemd unit, and the udev rule,
+#   5. writes /etc/fsk-coursekeeper-gps/gps.conf (0600 root),
+#   6. enables + restarts fsk-coursekeeper-gps.service,
+#   7. brings Tailscale up if an auth key was given, sets the Tailscale
+#      hostname, and publishes the API (HTTPS 443) and the NTRIP caster (TCP)
+#      with `tailscale serve`,
+#   8. verifies the service stays active and the API answers.
 #
 # Re-running against the same unit is safe — files are overwritten, config is
-# rewritten, apt/tailscale installs are no-ops when already present.
+# rewritten (an omitted --ntrip-username keeps the unit's current value), and
+# apt/tailscale installs are no-ops when already present.
 
 set -eu
 
+GPS_HOSTNAME="fsk-coursekeeper-gps"
+API_PORT=10200
+CASTER_PORT=2101
+CASTER_MOUNTPOINT="FSKBASE"
+DEFAULT_ALLOWED_ORIGINS="https://luftaquila.github.io,https://fsk.luftaquila.io,https://test.luftaquila.io"
+
 usage() {
     cat >&2 <<EOF
-usage: $(basename "$0") <host> [--ntrip-username=<id>] [--tailscale-authkey=<key>]
+usage: $(basename "$0") <host> [--ntrip-username=<id>] [--allowed-origins=<origin,...>]
+                        [--tailscale-authkey=<key>]
 
-Requires:
-  - <repo>/.env with INTERNAL_SECRET and PUBLIC_URL
-  - SSH key auth for fsk@<host> (cloud-init seeded https://github.com/luftaquila.keys)
+  --ntrip-username     NGII login. Required on the first run; later runs keep
+                       the unit's current value when omitted.
+  --allowed-origins    browser origins allowed by CORS
+                       (default: $DEFAULT_ALLOWED_ORIGINS)
+  --tailscale-authkey  bring Tailscale up with this key
+
+Requires SSH key auth for fsk@<host> (cloud-init seeded https://github.com/luftaquila.keys).
 EOF
     exit 2
 }
@@ -36,55 +51,34 @@ EOF
 HOST=""
 NTRIP_USER=""
 TS_AUTHKEY=""
-ENV_FILE_OVERRIDE=""
+ALLOWED_ORIGINS="$DEFAULT_ALLOWED_ORIGINS"
 for arg in "$@"; do
     case "$arg" in
-        --ntrip-username=*)   NTRIP_USER="${arg#*=}" ;;
+        --ntrip-username=*)    NTRIP_USER="${arg#*=}" ;;
         --tailscale-authkey=*) TS_AUTHKEY="${arg#*=}" ;;
-        --env-file=*)         ENV_FILE_OVERRIDE="${arg#*=}" ;;
-        -h|--help)            usage ;;
-        -*)                   echo "unknown flag: $arg" >&2; usage ;;
-        *)                    [ -z "$HOST" ] && HOST="$arg" || usage ;;
+        --allowed-origins=*)   ALLOWED_ORIGINS="${arg#*=}" ;;
+        -h|--help)             usage ;;
+        -*)                    echo "unknown flag: $arg" >&2; usage ;;
+        *)                     [ -z "$HOST" ] && HOST="$arg" || usage ;;
     esac
 done
 [ -n "$HOST" ] || usage
+case "$ALLOWED_ORIGINS" in
+    *[[:space:]]*) echo "--allowed-origins must be a comma list without spaces" >&2; exit 2 ;;
+esac
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
-# --env-file lets you point at a production .env (e.g. the deploy host's)
-# without committing real secrets into the repo's dev .env.
-ENV_FILE="${ENV_FILE_OVERRIDE:-$REPO_ROOT/.env}"
 GPS_DIR="$REPO_ROOT/rover/gps"
 PILOT_LIB="$REPO_ROOT/rover/pilot/pilot/lib"
-[ -f "$ENV_FILE" ] || { echo "cannot find $ENV_FILE" >&2; exit 1; }
-[ -d "$GPS_DIR" ]  || { echo "cannot find $GPS_DIR" >&2; exit 1; }
-
-# Pull only the keys we need; avoid leaking unrelated secrets into the env.
-grep_env() {
-    awk -F= -v k="$1" '
-        $0 ~ "^"k"=" { sub("^"k"=", ""); gsub(/^"|"$/, ""); print; exit; }' "$ENV_FILE"
-}
-
-INTERNAL_SECRET="$(grep_env INTERNAL_SECRET)"
-# 선택적 로버 전용 시크릿. 설정 시 GPS 유닛이 X-Rover-Secret으로 인증(허브 전역 INTERNAL_SECRET
-# 불필요). 비어 있으면 INTERNAL_SECRET으로 폴백.
-ROVER_SECRET="$(grep_env ROVER_SECRET)"
-PUBLIC_URL="$(grep_env PUBLIC_URL)"
-[ -n "$INTERNAL_SECRET" ] || { echo "INTERNAL_SECRET missing in $ENV_FILE" >&2; exit 1; }
-[ -n "$PUBLIC_URL" ]      || { echo "PUBLIC_URL missing in $ENV_FILE" >&2; exit 1; }
-
-SERVER_URL="$PUBLIC_URL/course"
-# --ntrip-username 미지정 시 .env의 NTRIP_USERNAME으로 폴백. 개인 NTRIP 계정을 스크립트에
-# 하드코딩하지 않는다(리포에 자격증명 상수를 남기지 않음).
-[ -n "$NTRIP_USER" ] || NTRIP_USER="$(grep_env NTRIP_USERNAME)"
-[ -n "$NTRIP_USER" ] || { echo "NTRIP username이 없습니다: --ntrip-username=<id> 또는 $ENV_FILE의 NTRIP_USERNAME을 설정하세요." >&2; exit 1; }
-SECRET_PREVIEW="$(printf '%s' "$INTERNAL_SECRET" | cut -c1-8)"
+[ -d "$GPS_DIR" ] || { echo "cannot find $GPS_DIR" >&2; exit 1; }
 
 printf 'provisioning fsk@%s (GPS unit)\n' "$HOST"
-printf '  SERVER_URL:      %s\n' "$SERVER_URL"
-printf '  INTERNAL_SECRET: %s…\n' "$SECRET_PREVIEW"
-printf '  NTRIP_USERNAME:  %s\n' "$NTRIP_USER"
-printf '  Tailscale:       %s\n\n' "$([ -n "$TS_AUTHKEY" ] && echo 'up via auth key' || echo 'install only (run tailscale up manually)')"
+printf '  hostname:        %s\n' "$GPS_HOSTNAME"
+printf '  NTRIP_USERNAME:  %s\n' "${NTRIP_USER:-(keep current)}"
+printf '  ALLOWED_ORIGINS: %s\n' "$ALLOWED_ORIGINS"
+printf '  API / caster:    127.0.0.1:%s / 127.0.0.1:%s/%s\n' "$API_PORT" "$CASTER_PORT" "$CASTER_MOUNTPOINT"
+printf '  Tailscale:       %s\n\n' "$([ -n "$TS_AUTHKEY" ] && echo 'up via auth key' || echo 'use the existing login')"
 
 SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout=10"
 
@@ -93,12 +87,13 @@ SSH_OPTS="-o BatchMode=yes -o StrictHostKeyChecking=accept-new -o ConnectTimeout
 STAGING="$(mktemp -d)"
 trap 'rm -rf "$STAGING"' EXIT
 mkdir -p "$STAGING/systemd" "$STAGING/udev" "$STAGING/pilot/lib"
-cp "$GPS_DIR/gps_register.py" "$GPS_DIR/requirements.txt" "$GPS_DIR/README.md" "$STAGING/"
-cp "$GPS_DIR/systemd/gps-register.service" "$STAGING/systemd/"
-cp "$GPS_DIR/udev/99-fsk-gps.rules" "$STAGING/udev/"
+cp "$GPS_DIR/gps_register.py" "$GPS_DIR/gps_api.py" "$GPS_DIR/ntrip_caster.py" \
+    "$GPS_DIR/requirements.txt" "$GPS_DIR/README.md" "$STAGING/"
+cp "$GPS_DIR/systemd/fsk-coursekeeper-gps.service" "$STAGING/systemd/"
+cp "$GPS_DIR/udev/99-fsk-coursekeeper-gps.rules" "$STAGING/udev/"
 : > "$STAGING/pilot/__init__.py"
 : > "$STAGING/pilot/lib/__init__.py"
-for m in ubx_parser ntrip_client geo_utils protocol_utils rtcm_utils; do
+for m in ubx_parser ntrip_client geo_utils rtcm_utils; do
     cp "$PILOT_LIB/$m.py" "$STAGING/pilot/lib/"
 done
 
@@ -106,22 +101,50 @@ done
 echo "[local] copying agent bundle to fsk@$HOST"
 tar -cz -C "$STAGING" . | ssh $SSH_OPTS "fsk@$HOST" 'cat > /tmp/gps-deploy.tgz'
 
-# 3. Remote provisioning. Secrets arrive on stdin (kept off argv); the
-#    heredoc body is quoted so nothing expands locally.
+# 3. Remote provisioning. Values arrive on stdin (kept off argv); the heredoc
+#    body is quoted so nothing expands locally. Every command that could read
+#    stdin gets </dev/null so it cannot swallow the rest of this script.
 {
-    printf '%s\n' "$INTERNAL_SECRET"
-    printf '%s\n' "$SERVER_URL"
     printf '%s\n' "$NTRIP_USER"
     printf '%s\n' "$TS_AUTHKEY"
-    printf '%s\n' "$ROVER_SECRET"
+    printf '%s\n' "$ALLOWED_ORIGINS"
+    printf '%s\n' "$GPS_HOSTNAME"
+    printf '%s\n' "$API_PORT"
+    printf '%s\n' "$CASTER_PORT"
+    printf '%s\n' "$CASTER_MOUNTPOINT"
     cat <<'REMOTE'
 set -eu
+CONF_DIR=/etc/fsk-coursekeeper-gps
+CONF="$CONF_DIR/gps.conf"
+OPT=/opt/fsk-coursekeeper-gps
+UNIT=fsk-coursekeeper-gps.service
+
+if [ -z "$NTRIP_USER" ] && sudo test -f "$CONF"; then
+    NTRIP_USER="$(sudo sed -n 's/^NTRIP_USERNAME=//p' "$CONF" </dev/null)"
+fi
+if [ -z "$NTRIP_USER" ]; then
+    echo "[gps] no NTRIP username on the unit yet — pass --ntrip-username=<id>" >&2
+    exit 1
+fi
 
 echo "[gps] installing python deps + tailscale"
-sudo apt-get update -qq
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-serial python3-requests >/dev/null
+sudo apt-get update -qq </dev/null
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-serial </dev/null >/dev/null
 if ! command -v tailscale >/dev/null 2>&1; then
-    curl -fsSL https://tailscale.com/install.sh | sh
+    curl -fsSL https://tailscale.com/install.sh </dev/null | sh
+fi
+
+echo "[gps] setting hostname $GPS_HOSTNAME"
+sudo hostnamectl set-hostname "$GPS_HOSTNAME" </dev/null
+if grep -q '^127\.0\.1\.1[[:space:]]' /etc/hosts; then
+    sudo sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t$GPS_HOSTNAME/" /etc/hosts
+else
+    printf '127.0.1.1\t%s\n' "$GPS_HOSTNAME" | sudo tee -a /etc/hosts >/dev/null
+fi
+if [ -d /etc/cloud/cloud.cfg.d ]; then
+    # Keep cloud-init from restoring the first-boot hostname / hosts file.
+    printf 'preserve_hostname: true\nmanage_etc_hosts: false\n' |
+        sudo tee /etc/cloud/cloud.cfg.d/99-fsk-coursekeeper-gps.cfg >/dev/null
 fi
 
 echo "[gps] hardening cold-boot clock/tailscale ordering (RTC-less, no fake-hwclock)"
@@ -130,7 +153,7 @@ echo "[gps] hardening cold-boot clock/tailscale ordering (RTC-less, no fake-hwcl
 # stays down, and MagicDNS (the only entry in the tailscale-managed resolv.conf)
 # is down too -> all DNS fails -> timesyncd cannot resolve the debian.pool.ntp.org
 # hostnames -> the clock never syncs -> deadlock that only a reboot clears.
-# Fix (mirrors the fsk-rover chrony fix): pin DNS-free NTP IPs so timesyncd can
+# Fix (mirrors the rover chrony fix): pin DNS-free NTP IPs so timesyncd can
 # step the clock without DNS, gate tailscaled on time-sync.target, and enable
 # systemd-time-wait-sync so the target waits for an actual clock sync.
 sudo install -d -m 755 /etc/systemd/timesyncd.conf.d
@@ -148,70 +171,96 @@ sudo tee /etc/systemd/system/tailscaled.service.d/override.conf >/dev/null <<'TS
 After=time-sync.target
 Wants=time-sync.target
 TSCONF
-sudo systemctl enable systemd-time-wait-sync.service >/dev/null 2>&1 || true
-sudo systemctl daemon-reload
-sudo systemctl restart systemd-timesyncd
+sudo systemctl enable systemd-time-wait-sync.service </dev/null >/dev/null 2>&1 || true
+sudo systemctl daemon-reload </dev/null
+sudo systemctl restart systemd-timesyncd </dev/null
 
-echo "[gps] deploying agent to /opt/gps-register"
+echo "[gps] deploying agent to $OPT"
 TMP="$(mktemp -d)"
 tar -xzf /tmp/gps-deploy.tgz -C "$TMP"
-sudo install -d -m 755 /opt/gps-register
-sudo install -m 755 "$TMP/gps_register.py" /opt/gps-register/gps_register.py
-sudo install -m 644 "$TMP/requirements.txt" "$TMP/README.md" /opt/gps-register/
-sudo rm -rf /opt/gps-register/pilot
-sudo cp -r "$TMP/pilot" /opt/gps-register/pilot
-sudo install -m 644 "$TMP/systemd/gps-register.service" /etc/systemd/system/gps-register.service
-sudo install -m 644 "$TMP/udev/99-fsk-gps.rules" /etc/udev/rules.d/99-fsk-gps.rules
+sudo install -d -m 755 "$OPT"
+sudo install -m 755 "$TMP/gps_register.py" "$OPT/gps_register.py"
+sudo install -m 644 "$TMP/gps_api.py" "$TMP/ntrip_caster.py" \
+    "$TMP/requirements.txt" "$TMP/README.md" "$OPT/"
+sudo rm -rf "$OPT/pilot"
+sudo cp -r "$TMP/pilot" "$OPT/pilot"
+sudo install -m 644 "$TMP/systemd/$UNIT" "/etc/systemd/system/$UNIT"
+sudo install -m 644 "$TMP/udev/99-fsk-coursekeeper-gps.rules" /etc/udev/rules.d/99-fsk-coursekeeper-gps.rules
 rm -rf "$TMP" /tmp/gps-deploy.tgz
 
-echo "[gps] writing /etc/gps-register/gps.conf"
-sudo install -d -m 755 /etc/gps-register
-# 0600 root-owned: holds INTERNAL_SECRET. systemd reads it as EnvironmentFile.
+echo "[gps] writing $CONF"
+sudo install -d -m 755 "$CONF_DIR"
+# 0600 root-owned: holds the NGII login. systemd reads it as EnvironmentFile.
 umask 077
-sudo tee /etc/gps-register/gps.conf >/dev/null <<EOF
-SERVER_URL=$SERVER_URL
-INTERNAL_SECRET=$INTERNAL_SECRET
-ROVER_SECRET=$ROVER_SECRET
+sudo tee "$CONF" >/dev/null <<EOF
 NTRIP_USERNAME=$NTRIP_USER
+API_PORT=$API_PORT
+CASTER_PORT=$CASTER_PORT
+CASTER_MOUNTPOINT=$CASTER_MOUNTPOINT
+ALLOWED_ORIGINS=$ALLOWED_ORIGINS
+DEVICE_ID=$GPS_HOSTNAME
 EOF
-sudo chmod 600 /etc/gps-register/gps.conf
+sudo chmod 600 "$CONF"
 
 echo "[gps] reloading udev"
-sudo udevadm control --reload-rules
-sudo udevadm trigger --subsystem-match=tty --subsystem-match=usb
+sudo udevadm control --reload-rules </dev/null
+sudo udevadm trigger --subsystem-match=tty --subsystem-match=usb </dev/null
 
-echo "[gps] enabling + restarting gps-register.service"
-sudo systemctl daemon-reload
-sudo systemctl enable gps-register.service >/dev/null 2>&1 || true
-sudo systemctl restart gps-register.service
+echo "[gps] enabling + restarting $UNIT"
+sudo systemctl daemon-reload </dev/null
+sudo systemctl enable "$UNIT" </dev/null >/dev/null 2>&1 || true
+sudo systemctl restart "$UNIT" </dev/null
 
 if [ -n "$TS_AUTHKEY" ]; then
     echo "[gps] bringing Tailscale up"
-    sudo tailscale up --auth-key="$TS_AUTHKEY"
+    sudo tailscale up --auth-key="$TS_AUTHKEY" --hostname="$GPS_HOSTNAME" </dev/null
 fi
 
-# Settle, then assert health — bad secrets/serial crash within ~8 s.
+TS_SERVE=skipped
+if sudo tailscale status </dev/null >/dev/null 2>&1; then
+    echo "[gps] publishing the API and caster with tailscale serve"
+    sudo tailscale set --hostname="$GPS_HOSTNAME" </dev/null
+    # Single-purpose device: rebuild the whole serve config so a changed port
+    # never leaves a stale handler behind.
+    sudo tailscale serve reset </dev/null
+    if ! sudo timeout 60 tailscale serve --bg --https=443 "http://127.0.0.1:$API_PORT" </dev/null ||
+       ! sudo timeout 60 tailscale serve --bg --tcp="$CASTER_PORT" "tcp://127.0.0.1:$CASTER_PORT" </dev/null; then
+        echo "[gps] tailscale serve failed — enable MagicDNS and HTTPS certificates for the tailnet, then re-run" >&2
+        exit 1
+    fi
+    TS_SERVE=configured
+fi
+
+# Settle, then assert health — bad config/serial crash within ~8 s.
 sleep 8
-if sudo systemctl is-active --quiet gps-register.service; then
-    echo "[gps] gps-register.service: active"
+if sudo systemctl is-active --quiet "$UNIT"; then
+    echo "[gps] $UNIT: active"
 else
-    echo "[gps] gps-register.service: NOT active — recent log:" >&2
-    sudo journalctl -u gps-register.service -n 30 --no-pager >&2
+    echo "[gps] $UNIT: NOT active — recent log:" >&2
+    sudo journalctl -u "$UNIT" -n 30 --no-pager </dev/null >&2
     exit 1
+fi
+if curl -fsS "http://127.0.0.1:$API_PORT/api/health" </dev/null >/dev/null; then
+    echo "[gps] API: healthy"
+else
+    echo "[gps] API: no answer on 127.0.0.1:$API_PORT" >&2
+    exit 1
+fi
+if [ "$TS_SERVE" = skipped ]; then
+    echo "[gps] Tailscale is not up — tailscale serve skipped. Run 'sudo tailscale up' on the unit, then re-run this script." >&2
 fi
 REMOTE
 } | ssh $SSH_OPTS "fsk@$HOST" \
-    'IFS= read -r INTERNAL_SECRET
-     IFS= read -r SERVER_URL
-     IFS= read -r NTRIP_USER
+    'IFS= read -r NTRIP_USER
      IFS= read -r TS_AUTHKEY
-     IFS= read -r ROVER_SECRET
-     export INTERNAL_SECRET SERVER_URL NTRIP_USER TS_AUTHKEY ROVER_SECRET
+     IFS= read -r ALLOWED_ORIGINS
+     IFS= read -r GPS_HOSTNAME
+     IFS= read -r API_PORT
+     IFS= read -r CASTER_PORT
+     IFS= read -r CASTER_MOUNTPOINT
+     export NTRIP_USER TS_AUTHKEY ALLOWED_ORIGINS GPS_HOSTNAME API_PORT CASTER_PORT CASTER_MOUNTPOINT
      sh -s'
 
 printf '\nprovisioning complete. Tail logs with:\n'
-printf '  ssh fsk@%s sudo journalctl -u gps-register.service -f\n' "$HOST"
-if [ -z "$TS_AUTHKEY" ]; then
-    printf '\nTailscale installed but not connected. Bring it up with:\n'
-    printf '  ssh fsk@%s sudo tailscale up\n' "$HOST"
-fi
+printf '  ssh fsk@%s sudo journalctl -u fsk-coursekeeper-gps.service -f\n' "$HOST"
+printf 'The unit now answers as %s (mDNS: %s.local).\n' "$GPS_HOSTNAME" "$GPS_HOSTNAME"

@@ -19,12 +19,12 @@ gps_node:
     # var (sourced from a podman secret in the rover image), never committed
     # to this file. Leave blank here so the repo stays safe to publish.
     ntrip:
-      # Caster host/port/password are hard-coded constants in gps_node.py
-      # because the rover only ever targets NGII (www.gnssdata.or.kr:2101)
-      # whose shared RTK login uses the fixed password "gnss". Only the
-      # per-operator username is configurable, and mountpoint is auto-
-      # selected at runtime by nearest-base-station lookup against the
-      # caster's source table.
+      # Default correction source is NGII (www.gnssdata.or.kr:2101), whose
+      # host/port and shared password "gnss" are constants in gps_node.py;
+      # only the per-operator username is configurable, and the mountpoint is
+      # auto-selected by nearest-base-station lookup in its source table. The
+      # hub can switch the source to a GPS unit's base-station caster
+      # (/rover/cmd/ntrip_source), which needs no username.
       username: ""
       gga_interval_s: 10.0             # Seconds between GGA heartbeats to the caster
 

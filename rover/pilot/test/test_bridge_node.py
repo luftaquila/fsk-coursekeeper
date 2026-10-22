@@ -484,9 +484,34 @@ def test_report_position_explicit_request_drains_ids():
     assert len(node._pending_position_request_ids) == 0   # drained on send
 
 
-# ---- server URL rule ----------------------------------------------------------
+# ---- correction-source relay + server URL rule --------------------------------
 
 from pilot.bridge_node import server_url_allowed  # noqa: E402
+
+
+def test_ntrip_source_caster_is_republished_as_json():
+    node = _make_sse_bridge()
+    node._pub_ntrip_source = _RecordingPub()
+    source = {"source": "caster", "host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"}
+    node._handle_sse_event('ntrip-source', json.dumps({**source, "extra": 1}))
+    node._handle_sse_event('ntrip-source', json.dumps({"source": "ngii"}))
+    assert [json.loads(m.data) for m in node._pub_ntrip_source.published] == [
+        source, {"source": "ngii"}]
+
+
+@pytest.mark.parametrize("payload", [
+    {"source": "base"}, {"source": "caster", "host": "h", "port": "2101", "mountpoint": "M"}, {}])
+def test_ntrip_source_malformed_is_dropped(payload):
+    node = _make_sse_bridge()
+    node._pub_ntrip_source = _RecordingPub()
+    node._handle_sse_event('ntrip-source', json.dumps(payload))
+    assert node._pub_ntrip_source.published == []
+
+
+def test_rtcm_event_is_no_longer_relayed():
+    node = _make_sse_bridge()
+    assert not hasattr(node, '_pub_rtcm_inject')
+    node._handle_sse_event('rtcm', json.dumps({"data": "3q2+7w=="}))  # ignored, no error
 
 
 @pytest.mark.parametrize("url", [

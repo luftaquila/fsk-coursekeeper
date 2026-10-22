@@ -1,6 +1,5 @@
 """Unit tests for the pure logic of the GPS-registration agent."""
 
-import base64
 import threading
 from types import SimpleNamespace
 
@@ -34,90 +33,6 @@ class TestFixStatusString:
     def test_dead_reckoning_maps_to_no_fix(self):
         # No IMU on this unit — DR transitions are spurious.
         assert gr.fix_status_string(_pvt(FixType.DEAD_RECKONING)) == "no_fix"
-
-
-class TestBuildTelemetry:
-    def test_minimal_omits_optional_keys(self):
-        t = gr.build_telemetry("3d_fix", False, None, None)
-        assert t == {"nav_state": "IDLE", "fix_status": "3d_fix",
-                     "ntrip_connected": False, "mode": "capture"}
-        assert "ntrip" not in t and "gps" not in t and "base" not in t
-
-    def test_includes_mode_and_base_when_given(self):
-        base = {"state": "active", "rtcm_bytes": 4096}
-        t = gr.build_telemetry("time_only", True, None, None, "base", base)
-        assert t["mode"] == "base"
-        assert t["base"] == base
-
-    def test_nav_state_always_idle(self):
-        assert gr.build_telemetry("rtk_fixed", True, None, None)["nav_state"] == "IDLE"
-
-    def test_includes_detail_when_present(self):
-        ntrip = {"mountpoint": "SEoul", "fail_count": 0}
-        gps = {"h_acc": 0.014, "num_sv": 21}
-        t = gr.build_telemetry("rtk_fixed", True, ntrip, gps)
-        assert t["ntrip"] == ntrip
-        assert t["gps"] == gps
-        assert t["ntrip_connected"] is True
-
-    def test_ntrip_connected_coerced_to_bool(self):
-        assert gr.build_telemetry("no_fix", 1, None, None)["ntrip_connected"] is True
-
-
-class TestIterSseEvents:
-    def test_parses_single_event(self):
-        lines = ["event: request-position", 'data: {"request_id":"abc"}', ""]
-        events = list(gr.iter_sse_events(iter(lines)))
-        assert events == [("request-position", '{"request_id":"abc"}')]
-
-    def test_skips_heartbeat_comments(self):
-        lines = [": heartbeat", "event: connected", "data: {}", ""]
-        events = list(gr.iter_sse_events(iter(lines)))
-        assert events == [("connected", "{}")]
-
-    def test_multiline_data_joined_with_newline(self):
-        lines = ["event: x", "data: line1", "data: line2", ""]
-        events = list(gr.iter_sse_events(iter(lines)))
-        assert events == [("x", "line1\nline2")]
-
-    def test_event_without_terminator_not_yielded(self):
-        # No trailing blank line — event is still buffered, not emitted.
-        lines = ["event: request-position", "data: {}"]
-        assert list(gr.iter_sse_events(iter(lines))) == []
-
-    def test_back_to_back_events(self):
-        lines = ["event: a", "data: 1", "", "event: b", "data: 2", ""]
-        assert list(gr.iter_sse_events(iter(lines))) == [("a", "1"), ("b", "2")]
-
-
-class TestReportPositionFixGate:
-    """_report_position must not forward a no-fix (0, 0) position — that jumps
-    the operator map to Null Island (blank grey — no basemap tiles)."""
-
-    @staticmethod
-    def _agent(fix_status, last_position=None):
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)  # skip __init__ (serial/threads)
-        agent._lock = threading.Lock()
-        agent._fix_status = fix_status
-        agent._last_position = last_position if last_position is not None else {"lat": 35.29, "lng": 126.57, "alt": 40.0}
-        agent._posts = []
-        agent._enqueue_post = lambda path, payload, label: agent._posts.append((path, payload, label))
-        return agent
-
-    def test_no_fix_is_not_reported(self):
-        for fix in (None, "no_fix", "time_only"):
-            agent = self._agent(fix)
-            agent._report_position()
-            assert agent._posts == []
-
-    def test_valid_fix_is_reported(self):
-        for fix in ("2d_fix", "3d_fix", "rtk_float", "rtk_fixed"):
-            agent = self._agent(fix)
-            agent._report_position()
-            assert len(agent._posts) == 1
-            assert agent._posts[0][0] == "/api/rover/position?device=gps"
-            # Periodic reports never carry a cone request id (capture answers those).
-            assert "request_id" not in agent._posts[0][1]
 
 
 class TestSplitHp:
@@ -184,6 +99,7 @@ class TestConfigureBase:
 
         agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
         agent._serial = _FakeSerial()
+        agent._meas_rate_ms = 100
         agent._configure_base(37.5, 127.0, 40.0, 0.01)
 
         cfg = self._decode_valset(agent._serial.written)
@@ -191,7 +107,13 @@ class TestConfigureBase:
         assert cfg[gr.CFG_TMODE_POS_TYPE] == 1   # LLH
         assert cfg[gr.CFG_TMODE_FIXED_POS_ACC] == 100  # 0.01 m -> 100 * 0.1mm
         for key in gr._RTCM_MSGOUT_KEYS:
-            assert cfg[key] == 1                 # each RTCM message enabled @1Hz
+            assert cfg[key] == 10                # every 10th 100 ms epoch -> 1 Hz
+
+    def test_rtcm_divider_keeps_base_output_at_1hz(self):
+        assert gr.rtcm_epoch_divider(100) == 10
+        assert gr.rtcm_epoch_divider(200) == 5
+        assert gr.rtcm_epoch_divider(1000) == 1
+        assert gr.rtcm_epoch_divider(2000) == 1  # slower fixes: every epoch
 
     def test_emits_scaled_tmode_llh_main_and_hp(self):
         # The main+HP decomposition of lat/lon/height must be wired straight from
@@ -203,6 +125,7 @@ class TestConfigureBase:
 
         agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
         agent._serial = _FakeSerial()
+        agent._meas_rate_ms = 100
         lat, lon, alt, acc = 37.5000000123, 127.0000000456, 40.1234, 0.02
         agent._configure_base(lat, lon, alt, acc)
         cfg = self._decode_valset(agent._serial.written)
@@ -250,88 +173,6 @@ class TestConfigureBase:
         for key in gr._RTCM_MSGOUT_KEYS:
             assert cfg[key] == 0                            # RTCM output off
         assert cfg[gr.CFG_MSGOUT_UBX_NAV_PVT_USB] == 1      # NAV output still on
-
-
-class TestSurveySampleHeight:
-    """Survey must record ELLIPSOIDAL height (feeds TMODE LLH), not MSL."""
-
-    def test_on_hpposllh_collects_ellipsoidal_height(self):
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._survey = {"point_id": 1, "samples": []}
-        agent._capture = None
-        agent._fix_status = "rtk_fixed"
-        agent._last_hpposllh = None
-        agent._last_position = None
-        hp = SimpleNamespace(lat=37.5, lon=127.0, height=65.0, h_msl=40.0, h_acc=0.01)
-        agent._on_hpposllh(hp)
-        # The sampled altitude must be the ellipsoidal height (65.0), never MSL (40.0).
-        assert agent._survey["samples"] == [(37.5, 127.0, 65.0, 0.01)]
-
-    def test_no_sample_unless_rtk_fixed(self):
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._survey = {"point_id": 1, "samples": []}
-        agent._capture = None
-        agent._fix_status = "rtk_float"
-        agent._last_hpposllh = None
-        agent._last_position = None
-        agent._on_hpposllh(SimpleNamespace(lat=37.5, lon=127.0, height=65.0, h_msl=40.0, h_acc=0.5))
-        assert agent._survey["samples"] == []
-
-    @staticmethod
-    def _capture_agent(mode):
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._survey = None
-        agent._capture = {"request_ids": [], "samples": []}
-        agent._fix_status = "rtk_fixed"
-        agent._mode = mode
-        agent._last_hpposllh = None
-        agent._last_position = None
-        return agent
-
-    def test_capture_collects_msl_height_in_capture_mode(self):
-        agent = self._capture_agent("capture")
-        agent._on_hpposllh(SimpleNamespace(lat=37.5, lon=127.0, height=65.0, h_msl=40.0, h_acc=0.01))
-        # Cones carry MSL altitude (40.0), not ellipsoidal (65.0).
-        assert agent._capture["samples"] == [(37.5, 127.0, 40.0, 0.01)]
-
-    def test_capture_does_not_collect_in_base_output_mode(self):
-        # A capture left running when base output activates must not absorb the
-        # fixed base ARP (which the F9P emits as rtk_fixed) as a cone.
-        agent = self._capture_agent("base-output")
-        agent._on_hpposllh(SimpleNamespace(lat=37.5, lon=127.0, height=65.0, h_msl=40.0, h_acc=0.01))
-        assert agent._capture["samples"] == []
-
-
-class TestBaseReconfigHandoff:
-    """_activate_base/_deactivate_base latch _pending_reconfig (under the lock)."""
-
-    @staticmethod
-    def _agent():
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._pending_reconfig = None
-        agent._base_params = None
-        agent._mode = "capture"
-        return agent
-
-    def test_activate_then_deactivate(self):
-        agent = self._agent()
-        agent._activate_base({"lat": 37.5, "lng": 127.0, "alt": 40.0, "acc": 0.01})
-        assert agent._mode == "base-output"
-        assert agent._pending_reconfig == ("base", agent._base_params)
-        agent._deactivate_base()
-        assert agent._mode == "capture"
-        assert agent._pending_reconfig == ("capture", None)
-        assert agent._base_params is None
-
-    def test_activate_ignored_without_coords(self):
-        agent = self._agent()
-        agent._activate_base({"lat": None, "lng": None})
-        assert agent._mode == "capture"
-        assert agent._pending_reconfig is None
 
 
 class TestNtripWorkerBaseGuard:
@@ -400,194 +241,585 @@ class TestEvaluateSurvey:
         assert abs(lat - 37.5) < 1e-6 and abs(lon - 127.0) < 1e-6
 
 
-class TestSurveyWorkerReporting:
-    """_survey_worker must POST an explicit result on completion — success with
-    the averaged coordinate, or an ok:false failure when the quality gate fails."""
+# ---- agent (constructed without hardware via the make_agent fixture) --------
 
-    @staticmethod
-    def _agent():
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._running = True
-        agent._mode = "base-survey"
-        agent._posts = []
-        agent._enqueue_post = lambda path, payload, label: agent._posts.append((path, payload, label))
-        return agent
+from conftest import tight_samples  # noqa: E402
+from gps_api import ApiError  # noqa: E402
+from pilot.lib.rtcm_utils import build_frame  # noqa: E402
+import json  # noqa: E402
+import os  # noqa: E402
+import subprocess  # noqa: E402
 
-    def test_reports_failure_on_zero_samples(self):
-        agent = self._agent()
-        agent._survey = {"point_id": 7, "samples": []}
-        agent._survey_worker(7, 0)  # duration 0 → finalize immediately
-        assert len(agent._posts) == 1
-        path, payload, _ = agent._posts[0]
-        assert path == "/api/rover/base/survey-result"
-        assert payload["point_id"] == 7 and payload["ok"] is False
-        assert payload["error"] == "insufficient_samples"
+import pytest  # noqa: E402
+
+
+def _hp(lat=37.5, lon=127.0, height=65.0, h_msl=40.0, h_acc=0.01):
+    return SimpleNamespace(lat=lat, lon=lon, height=height, h_msl=h_msl, h_acc=h_acc)
+
+
+def _surveyed_point(agent, name="BASE"):
+    point = agent.create_point(name)
+    agent._finish_survey(point["id"], tight_samples())
+    return next(p for p in agent.list_points() if p["id"] == point["id"])
+
+
+def _api_error(fn, *args, **kwargs):
+    with pytest.raises(ApiError) as exc:
+        fn(*args, **kwargs)
+    return exc.value
+
+
+class TestSurveySampleHeight:
+    """Survey must record ELLIPSOIDAL height (feeds TMODE LLH), not MSL."""
+
+    def test_on_hpposllh_collects_ellipsoidal_height(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._survey = {"point_id": 1, "samples": [], "started_at": 0, "duration_s": 60}
+        agent._fix_status = "rtk_fixed"
+        agent._on_hpposllh(_hp())
+        # The sampled altitude must be the ellipsoidal height (65.0), never MSL (40.0).
+        assert agent._survey["samples"] == [(37.5, 127.0, 65.0, 0.01)]
+
+    def test_no_sample_unless_rtk_fixed(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._survey = {"point_id": 1, "samples": [], "started_at": 0, "duration_s": 60}
+        agent._fix_status = "rtk_float"
+        agent._on_hpposllh(_hp(h_acc=0.5))
+        assert agent._survey["samples"] == []
+
+    def test_capture_collects_msl_height_in_capture_mode(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._capture = {"waiters": [], "samples": []}
+        agent._fix_status = "rtk_fixed"
+        agent._on_hpposllh(_hp())
+        # Cones carry MSL altitude (40.0), not ellipsoidal (65.0).
+        assert agent._capture["samples"] == [(37.5, 127.0, 40.0, 0.01)]
+
+    def test_capture_does_not_collect_in_base_output_mode(self, make_agent):
+        # A capture left running when base output activates must not absorb the
+        # fixed base ARP (which the F9P emits as rtk_fixed) as a cone.
+        agent, _, _ = make_agent()
+        agent._capture = {"waiters": [], "samples": []}
+        agent._fix_status = "rtk_fixed"
+        agent._mode = "base-output"
+        agent._on_hpposllh(_hp())
+        assert agent._capture["samples"] == []
+
+
+class TestLastPosition:
+    """last_position must never carry a no-fix (0, 0) — that jumps the
+    operator map to Null Island — nor the base's own ARP."""
+
+    @pytest.mark.parametrize("fix", [None, "no_fix", "time_only"])
+    def test_no_fix_is_not_recorded(self, make_agent, fix):
+        agent, _, _ = make_agent()
+        agent._fix_status = fix
+        agent._on_hpposllh(_hp(lat=0.0, lon=0.0))
+        assert agent.status()["last_position"] is None
+
+    @pytest.mark.parametrize("fix", ["2d_fix", "3d_fix", "rtk_float", "rtk_fixed"])
+    def test_valid_fix_is_recorded_with_timestamp(self, make_agent, fix):
+        agent, _, _ = make_agent()
+        agent._fix_status = fix
+        agent._on_hpposllh(_hp())
+        pos = agent.status()["last_position"]
+        assert pos["lat"] == 37.5 and pos["lng"] == 127.0 and pos["alt"] == 40.0
+        assert isinstance(pos["at"], int) and pos["at"] > 0
+
+    def test_base_output_does_not_record(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._fix_status = "rtk_fixed"
+        agent._mode = "base-output"
+        agent._on_hpposllh(_hp())
+        assert agent.status()["last_position"] is None
+
+
+class TestStatus:
+    def test_shape_in_capture_mode(self, make_agent):
+        agent, _, _ = make_agent()
+        status = agent.status()
+        assert status["device"] == {"id": "fsk-coursekeeper-gps", "name": "fsk-coursekeeper-gps",
+                                    "kind": "gps"}
+        assert status["receiver_connected"] is False  # no serial opened
+        assert status["mode"] == "capture"
+        assert status["fix_status"] is None and status["gps"] is None
+        assert status["ntrip_connected"] is False and status["ntrip"] is None
+        assert status["base"] == {
+            "state": "idle", "point_id": None, "survey": None, "rtcm_bytes": 0,
+            "clients": 0, "host": "100.64.0.7", "mountpoint": "FSKBASE", "port": 2101,
+        }
+
+    def test_survey_progress(self, make_agent):
+        agent, _, _ = make_agent()
+        point = agent.create_point("P1")
+        agent._survey = {"point_id": point["id"], "samples": [(1, 2, 3, 4)] * 5,
+                         "started_at": 1234, "duration_s": 60}
+        base = agent.status()["base"]
+        assert base["state"] == "surveying" and base["point_id"] == point["id"]
+        assert base["survey"] == {"started_at": 1234, "duration_s": 60, "samples": 5}
+
+    def test_host_is_null_without_tailscale(self, make_agent):
+        agent, _, _ = make_agent(tailscale_ip=None)
+        assert agent.status()["base"]["host"] is None
+        assert agent.get_config()["caster"]["host"] is None
+
+    def test_status_loop_publishes_on_notify(self, make_agent):
+        agent, events, _ = make_agent(status_interval=0.05)
+        thread = threading.Thread(target=agent._status_loop, daemon=True)
+        thread.start()
+        agent.notify_status()
+        for _ in range(100):
+            if events.named("gps:status"):
+                break
+            threading.Event().wait(0.01)
+        agent.stop()
+        thread.join(timeout=2)
+        assert events.named("gps:status")[0]["mode"] == "capture"
+
+
+class TestFeedBaseOutput:
+    def test_rtcm_frames_go_to_caster(self, make_agent):
+        agent, _, caster = make_agent()
+        point = _surveyed_point(agent)
+        agent._activate_base(point)
+        agent._mode = "base-output"
+        agent._rtcm_framer = gr.RTCM3Framer()
+        frame_a = build_frame(b"\x43\x50" + bytes(20))
+        frame_b = build_frame(b"\x3e\xd0" + bytes(10))
+        agent._feed(b"\x00junk" + frame_a + frame_b[:5])
+        agent._feed(frame_b[5:])
+        assert caster.frames == [frame_a, frame_b]
+        assert agent.status()["base"]["rtcm_bytes"] == len(frame_a) + len(frame_b)
+        assert agent.status()["receiver_connected"] is False  # serial not open
+
+    def test_capture_mode_does_not_publish_rtcm(self, make_agent):
+        agent, _, caster = make_agent()
+        agent._feed(build_frame(b"\x43\x50" + bytes(20)))
+        assert caster.frames == []
+
+
+class TestBaseActivation:
+    def test_activate_then_deactivate(self, make_agent):
+        agent, _, caster = make_agent()
+        point = _surveyed_point(agent)
+        agent._activate_base(point)
+        assert agent._mode == "base-output"
+        assert agent._pending_reconfig == ("base", agent._base_params)
+        assert agent._base_params["lat"] == point["lat"]
+        assert agent._base_params["acc"] == point["h_acc_m"]
+        assert caster.active is True
+        agent._deactivate_base()
         assert agent._mode == "capture"
+        assert agent._pending_reconfig == ("capture", None)
+        assert agent._base_params is None
+        assert caster.active is False
 
-    def test_reports_failure_on_too_few_samples(self):
-        agent = self._agent()
-        # Some rtk_fixed samples, but below the survey minimum → still a failure.
-        agent._survey = {"point_id": 5, "samples": [
-            (37.0, 127.0, 30.0, 0.01) for _ in range(10)
-        ]}
-        agent._survey_worker(5, 0)
-        _, payload, _ = agent._posts[0]
-        assert payload["ok"] is False and payload["error"] == "insufficient_samples"
-        assert payload["samples"] == 10
-
-    def test_reports_failure_on_unstable(self):
-        agent = self._agent()
-        # Enough samples, but scattered over metres → "unstable".
-        samples = [(37.0, 127.0, 30.0, 0.01) for _ in range(80)]
-        samples += [(37.0 + i * 1e-5, 127.0, 30.0, 0.01) for i in range(20)]
-        agent._survey = {"point_id": 6, "samples": samples}
-        agent._survey_worker(6, 0)
-        _, payload, _ = agent._posts[0]
-        assert payload["ok"] is False and payload["error"] == "unstable"
-
-    def test_reports_success_with_average(self):
-        agent = self._agent()
-        # 80 tightly-clustered rtk_fixed samples → passes the quality gate.
-        agent._survey = {"point_id": 3, "samples": [
-            (37.1 + i * 1e-9, 127.1 + i * 1e-9, 30.0, 0.01) for i in range(80)
-        ]}
-        agent._survey_worker(3, 0)
-        assert len(agent._posts) == 1
-        _, payload, _ = agent._posts[0]
-        assert payload["ok"] is True and payload["samples"] == 80
-        assert abs(payload["lat"] - 37.1) < 1e-6 and abs(payload["lng"] - 127.1) < 1e-6
-        assert payload["std_m"] < gr.SURVEY_MAX_STD_M
-
-    def test_superseded_survey_is_not_clobbered_or_reported(self):
-        # A finalizing worker whose survey was replaced by a NEWER one (different
-        # point_id) must not clear it, reset the mode, or post a stale result —
-        # otherwise the new survey is lost and the server stays "surveying".
-        agent = self._agent()
-        newer = {"point_id": 200, "samples": [(37.0, 127.0, 30.0, 0.01)]}
-        agent._survey = newer
-        agent._survey_worker(100, 0)  # old worker for point 100 finalizes
-        assert agent._posts == [], "no result posted for the superseded survey"
-        assert agent._survey is newer, "the newer survey is left intact"
-        assert agent._mode == "base-survey", "mode not reset out from under the new survey"
+    def test_activation_cancels_running_survey(self, make_agent):
+        agent, _, _ = make_agent()
+        point = _surveyed_point(agent)
+        agent._mode = "base-survey"
+        agent._survey = {"point_id": point["id"], "samples": [], "started_at": 0, "duration_s": 60}
+        agent._activate_base(point)
+        assert agent._survey is None
 
 
-class TestHandleEventRobustness:
-    """A single malformed/unexpected SSE event must never propagate out of
-    _handle_event (which would kill the SSE thread and leave the unit deaf)."""
+class TestCapture:
+    def test_refused_in_base_mode(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._mode = "base-output"
+        err = _api_error(agent.capture)
+        assert (err.status, err.reason) == (409, "base_mode")
 
-    @staticmethod
-    def _agent():
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._running = True
-        agent._mode = "capture"
-        agent._survey = None
-        agent._capture = None
-        return agent
+    def test_refused_while_surveying(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._mode = "base-survey"
+        err = _api_error(agent.capture)
+        assert (err.status, err.reason) == (409, "survey_in_progress")
 
-    def test_bad_json_is_swallowed(self):
-        agent = self._agent()
-        agent._handle_event("base-survey-start", "{not json")
-        assert agent._survey is None and agent._mode == "capture"
+    def test_no_stable_fix_is_422(self, make_agent, monkeypatch):
+        agent, _, _ = make_agent()
+        monkeypatch.setattr(gr, "CAPTURE_WINDOW_S", 0.05)
+        err = _api_error(agent.capture)
+        assert (err.status, err.reason) == (422, "capture_failed")
+        assert err.body()["samples"] == 0
 
-    def test_non_integer_point_id_does_not_raise_or_corrupt_state(self):
-        agent = self._agent()
-        # int("abc") would raise inside _start_survey; the handler must contain it
-        # AND the state must be untouched (validated before any mutation).
-        agent._handle_event("base-survey-start", '{"point_id": "abc"}')
-        assert agent._survey is None and agent._mode == "capture"
+    def test_timeout_is_504(self, make_agent, monkeypatch):
+        agent, _, _ = make_agent()
+        monkeypatch.setattr(agent, "_start_capture", lambda: gr._CaptureWaiter())
+        err = _api_error(agent.capture, timeout=0.01)
+        assert (err.status, err.reason) == (504, "capture_timeout")
 
-    def test_unknown_event_is_ignored(self):
-        agent = self._agent()
-        agent._handle_event("execute-path", '{"waypoints": []}')  # rover-only, no-op here
-        assert agent._survey is None and agent._mode == "capture"
+    def test_stable_fix_returns_coordinate(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._fix_status = "rtk_fixed"
+        waiter = agent._start_capture()
+        for i in range(gr.CAPTURE_MIN_SAMPLES):
+            agent._on_hpposllh(_hp(lat=37.5 + i * 1e-9))
+        assert waiter.event.wait(3.0)
+        lat, lng, alt = waiter.result
+        assert abs(lat - 37.5) < 1e-6 and abs(lng - 127.0) < 1e-6 and alt == 40.0
+
+    def test_capture_maps_result(self, make_agent, monkeypatch):
+        agent, _, _ = make_agent()
+        waiter = gr._CaptureWaiter()
+        waiter.resolve((37.5, 127.0, 40.0), 12)
+        monkeypatch.setattr(agent, "_start_capture", lambda: waiter)
+        assert agent.capture() == {"lat": 37.5, "lng": 127.0, "alt": 40.0}
 
 
 class TestCaptureWorker:
-    """_capture_worker answers a cone request from a stable rtk_fixed window, or
-    reports an explicit failure — the main cone-capture path."""
+    def test_joins_concurrent_requests_into_one_window(self, make_agent):
+        agent, _, _ = make_agent()
+        agent._capture = {"waiters": [gr._CaptureWaiter()], "samples": []}
+        second = agent._start_capture()
+        assert agent._capture["waiters"][1] is second
 
-    @staticmethod
-    def _agent():
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._running = True
-        agent._posts = []
-        agent._enqueue_post = lambda path, payload, label: agent._posts.append((path, payload, label))
-        return agent
-
-    def test_posts_averaged_position_with_request_ids(self):
-        agent = self._agent()
-        agent._capture = {"request_ids": ["rid-1"], "samples": [
-            (37.5 + i * 1e-9, 127.0 + i * 1e-9, 30.0, 0.01) for i in range(15)
-        ]}
-        agent._capture_worker()  # 15 stable samples → resolves on the first poll
-        assert len(agent._posts) == 1
-        path, payload, _ = agent._posts[0]
-        assert path == "/api/rover/position?device=gps"
-        assert payload["request_id"] == "rid-1" and payload["request_ids"] == ["rid-1"]
-        assert abs(payload["lat"] - 37.5) < 1e-6 and "capture_failed" not in payload
-
-    def test_posts_failure_when_no_stable_fix(self):
-        agent = self._agent()
+    def test_failure_resolves_every_waiter(self, make_agent):
+        agent, _, _ = make_agent()
         agent._running = False  # skip the poll loop → finalize immediately
-        agent._capture = {"request_ids": ["rid-2"], "samples": []}
+        waiters = [gr._CaptureWaiter(), gr._CaptureWaiter()]
+        agent._capture = {"waiters": waiters, "samples": []}
         agent._capture_worker()
-        assert len(agent._posts) == 1
-        _, payload, _ = agent._posts[0]
-        assert payload["capture_failed"] is True
-        assert payload["error"] == "no_stable_rtk_fix"
-        assert payload["request_id"] == "rid-2"
-
-    def test_joins_multiple_requests_into_one_capture(self):
-        agent = self._agent()
-        # A capture is already in flight → a second request joins it (no new worker).
-        agent._capture = {"request_ids": ["first"], "samples": []}
-        agent._start_capture("second")
-        assert agent._capture["request_ids"] == ["first", "second"]
+        assert all(w.event.is_set() and w.result is None for w in waiters)
+        assert agent._capture is None
 
 
-class TestMaybeFlushRtcm:
-    """_maybe_flush_rtcm relays buffered RTCM ~1×/epoch (or sooner if it piles up)."""
+class TestSurveyPoints:
+    def test_create_list_and_persist(self, make_agent, tmp_path):
+        agent, _, _ = make_agent()
+        a = agent.create_point("  Alpha ")
+        b = agent.create_point("Beta")
+        assert a["name"] == "Alpha" and b["id"] == a["id"] + 1
+        assert a["lat"] is None and a["surveyed_at"] is None
+        assert a["created_at"].endswith("Z") and a["updated_at"] == a["created_at"]
+        reloaded, _, _ = make_agent()
+        assert [p["name"] for p in reloaded.list_points()] == ["Alpha", "Beta"]
+        on_disk = json.loads((tmp_path / "state.json").read_text())
+        assert on_disk["next_point_id"] == b["id"] + 1
+
+    @pytest.mark.parametrize("name", [None, "", "   ", 42, "x" * 101])
+    def test_invalid_name(self, make_agent, name):
+        agent, _, _ = make_agent()
+        err = _api_error(agent.create_point, name)
+        assert (err.status, err.reason) == (400, "invalid_name")
+
+    def test_duplicate_name(self, make_agent):
+        agent, _, _ = make_agent()
+        agent.create_point("Alpha")
+        err = _api_error(agent.create_point, "Alpha ")
+        assert (err.status, err.reason) == (409, "duplicate_name")
+
+    def test_ids_are_not_reused_after_delete(self, make_agent):
+        agent, _, _ = make_agent()
+        a = agent.create_point("A")
+        agent.delete_point(a["id"])
+        assert agent.create_point("B")["id"] == a["id"] + 1
+
+    def test_delete_unknown(self, make_agent):
+        agent, _, _ = make_agent()
+        err = _api_error(agent.delete_point, 99)
+        assert (err.status, err.reason) == (404, "point_not_found")
+
+    def test_delete_active_base_point_refused(self, make_agent):
+        agent, _, _ = make_agent()
+        point = _surveyed_point(agent)
+        agent.set_config({"mode": "base", "active_base_point_id": point["id"]})
+        err = _api_error(agent.delete_point, point["id"])
+        assert (err.status, err.reason) == (409, "active_base_point")
+        agent.set_config({"mode": "capture"})
+        agent.delete_point(point["id"])
+        assert agent.list_points() == []
+
+    def test_delete_cancels_its_survey(self, make_agent):
+        agent, _, _ = make_agent()
+        point = agent.create_point("A")
+        agent._mode = "base-survey"
+        agent._survey = {"point_id": point["id"], "samples": [], "started_at": 0, "duration_s": 60}
+        agent.delete_point(point["id"])
+        assert agent._survey is None and agent._mode == "capture"
+
+    def test_failed_write_keeps_memory_state(self, make_agent, monkeypatch):
+        agent, _, _ = make_agent()
+
+        def _fail(*_a, **_kw):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(gr, "save_state", _fail)
+        err = _api_error(agent.create_point, "A")
+        assert (err.status, err.reason) == (500, "storage_error")
+        assert agent.list_points() == []
+
+
+class TestSurveyStart:
+    @pytest.mark.parametrize("duration", [9, 1801, "120", 12.5, True])
+    def test_invalid_duration(self, make_agent, duration):
+        agent, _, _ = make_agent()
+        point = agent.create_point("A")
+        err = _api_error(agent.start_survey, point["id"], duration)
+        assert (err.status, err.reason) == (400, "invalid_duration")
+
+    def test_default_duration(self, make_agent):
+        agent, _, _ = make_agent()
+        point = agent.create_point("A")
+        res = agent.start_survey(point["id"])
+        assert res["duration_s"] == gr.SURVEY_DEFAULT_DURATION_S
+        assert agent._mode == "base-survey"
+        agent.cancel_survey(point["id"])
+        assert agent._mode == "capture" and agent._survey is None
+
+    def test_unknown_point(self, make_agent):
+        agent, _, _ = make_agent()
+        err = _api_error(agent.start_survey, 5, 60)
+        assert (err.status, err.reason) == (404, "point_not_found")
+
+    def test_requires_ngii_login(self, make_agent):
+        agent, _, _ = make_agent(ntrip_username="")
+        point = agent.create_point("A")
+        err = _api_error(agent.start_survey, point["id"], 60)
+        assert (err.status, err.reason) == (409, "ntrip_not_configured")
+
+    def test_refused_in_base_mode(self, make_agent):
+        agent, _, _ = make_agent()
+        base = _surveyed_point(agent)
+        other = agent.create_point("B")
+        agent.set_config({"mode": "base", "active_base_point_id": base["id"]})
+        err = _api_error(agent.start_survey, other["id"], 60)
+        assert (err.status, err.reason) == (409, "base_mode")
+
+    def test_refused_while_surveying(self, make_agent):
+        agent, _, _ = make_agent()
+        a = agent.create_point("A")
+        b = agent.create_point("B")
+        agent.start_survey(a["id"], 60)
+        err = _api_error(agent.start_survey, b["id"], 60)
+        assert (err.status, err.reason) == (409, "survey_in_progress")
+        assert err.body()["point_id"] == a["id"]
+        agent.cancel_survey(a["id"])
+
+    def test_cancel_unknown_point(self, make_agent):
+        agent, _, _ = make_agent()
+        err = _api_error(agent.cancel_survey, 3)
+        assert err.status == 404
+
+
+class TestSurveyWorkerReporting:
+    """_survey_worker must announce an explicit result on completion — success
+    stored on the point, or an ok:false failure when the quality gate fails."""
 
     @staticmethod
-    def _agent():
-        agent = gr.GpsRegisterAgent.__new__(gr.GpsRegisterAgent)
-        agent._lock = threading.Lock()
-        agent._rtcm_out = bytearray()
-        agent._rtcm_last_flush = 0.0
-        agent._rtcm_bytes = 0
-        agent._posts = []
-        agent._enqueue_post = lambda path, payload, label: agent._posts.append((path, payload, label))
-        return agent
+    def _start(agent, point_id, samples):
+        agent._mode = "base-survey"
+        agent._survey = {"point_id": point_id, "samples": samples, "started_at": 0, "duration_s": 0}
 
-    def test_noop_when_empty(self):
-        agent = self._agent()
-        agent._maybe_flush_rtcm(1000.0)
-        assert agent._posts == []
+    def test_reports_failure_on_zero_samples(self, make_agent):
+        agent, events, _ = make_agent()
+        point = agent.create_point("A")
+        self._start(agent, point["id"], [])
+        agent._survey_worker(point["id"], 0)  # duration 0 → finalize immediately
+        assert events.named("gps:survey_result") == [{
+            "point_id": point["id"], "name": "A", "ok": False,
+            "error": "insufficient_samples", "samples": 0,
+        }]
+        assert agent._mode == "capture"
+        assert agent.list_points()[0]["lat"] is None
 
-    def test_holds_small_buffer_within_interval(self):
-        agent = self._agent()
-        agent._rtcm_last_flush = 100.0
-        agent._rtcm_out = bytearray(b"\xd3\x00\x04abc")
-        agent._maybe_flush_rtcm(100.1)  # 0.1 s < flush interval → held
-        assert agent._posts == [] and len(agent._rtcm_out) > 0
+    def test_reports_failure_on_unstable(self, make_agent):
+        agent, events, _ = make_agent()
+        point = agent.create_point("A")
+        samples = [(37.0, 127.0, 30.0, 0.01) for _ in range(80)]
+        samples += [(37.0 + i * 1e-5, 127.0, 30.0, 0.01) for i in range(20)]
+        self._start(agent, point["id"], samples)
+        agent._survey_worker(point["id"], 0)
+        result = events.named("gps:survey_result")[0]
+        assert result["ok"] is False and result["error"] == "unstable"
 
-    def test_flushes_over_size_threshold(self):
-        agent = self._agent()
-        payload = b"\xd3" * (gr._RTCM_FLUSH_MAX_BYTES + 1)
-        agent._rtcm_out = bytearray(payload)
-        agent._maybe_flush_rtcm(0.0)  # interval not elapsed, but size forces a flush
-        assert len(agent._posts) == 1
-        path, body, _ = agent._posts[0]
-        assert path == "/api/rover/base/rtcm"
-        assert base64.b64decode(body["data"]) == payload
-        assert agent._rtcm_out == bytearray()  # drained
+    def test_success_is_persisted(self, make_agent):
+        agent, events, _ = make_agent()
+        point = agent.create_point("A")
+        self._start(agent, point["id"], tight_samples(alt=65.0))
+        agent._survey_worker(point["id"], 0)
+        assert events.named("gps:survey_result") == [
+            {"point_id": point["id"], "name": "A", "ok": True, "samples": 80}]
+        stored = make_agent()[0].list_points()[0]
+        assert abs(stored["lat"] - 37.1) < 1e-6 and abs(stored["lng"] - 127.1) < 1e-6
+        assert stored["alt"] == 65.0 and stored["h_acc_m"] == 0.01 and stored["samples"] == 80
+        assert stored["surveyed_at"] == stored["updated_at"]
 
-    def test_flushes_after_interval(self):
-        agent = self._agent()
-        agent._rtcm_last_flush = 100.0
-        agent._rtcm_out = bytearray(b"\xd3abc")
-        agent._maybe_flush_rtcm(100.0 + gr._RTCM_FLUSH_INTERVAL_S + 0.1)
-        assert len(agent._posts) == 1
+    def test_superseded_survey_is_not_clobbered_or_reported(self, make_agent):
+        # A finalizing worker whose survey was replaced by a NEWER one must not
+        # clear it, reset the mode, or report a stale result.
+        agent, events, _ = make_agent()
+        newer = {"point_id": 200, "samples": [], "started_at": 0, "duration_s": 60}
+        agent._mode = "base-survey"
+        agent._survey = newer
+        agent._survey_worker(100, 0)
+        assert events.named("gps:survey_result") == []
+        assert agent._survey is newer
+        assert agent._mode == "base-survey"
+
+
+class TestConfig:
+    def test_default(self, make_agent):
+        agent, _, _ = make_agent()
+        assert agent.get_config() == {
+            "mode": "capture", "active_base_point_id": None,
+            "caster": {"host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"},
+        }
+
+    @pytest.mark.parametrize("body,status,reason", [
+        ({}, 400, "invalid_mode"),
+        ({"mode": "rover"}, 400, "invalid_mode"),
+        ({"mode": "base"}, 400, "invalid_point_id"),
+        ({"mode": "base", "active_base_point_id": "1"}, 400, "invalid_point_id"),
+        ({"mode": "base", "active_base_point_id": 77}, 404, "point_not_found"),
+    ])
+    def test_invalid(self, make_agent, body, status, reason):
+        agent, _, _ = make_agent()
+        err = _api_error(agent.set_config, body)
+        assert (err.status, err.reason) == (status, reason)
+
+    def test_base_requires_surveyed_point(self, make_agent):
+        agent, _, caster = make_agent()
+        point = agent.create_point("A")
+        err = _api_error(agent.set_config, {"mode": "base", "active_base_point_id": point["id"]})
+        assert (err.status, err.reason) == (409, "point_not_surveyed")
+        assert agent._mode == "capture" and caster.active is False
+
+    def test_switch_to_base_and_back(self, make_agent):
+        agent, _, caster = make_agent()
+        point = _surveyed_point(agent)
+        cfg = agent.set_config({"mode": "base", "active_base_point_id": point["id"]})
+        assert cfg["mode"] == "base" and cfg["active_base_point_id"] == point["id"]
+        assert agent._pending_reconfig[0] == "base"
+        assert caster.active is True and caster.position == (point["lat"], point["lng"])
+        status = agent.status()
+        assert status["mode"] == "base"
+        assert status["base"]["state"] == "active" and status["base"]["point_id"] == point["id"]
+        cfg = agent.set_config({"mode": "capture"})
+        assert cfg["mode"] == "capture" and cfg["active_base_point_id"] is None
+        assert agent._pending_reconfig == ("capture", None)
+        assert caster.active is False
+
+    def test_same_base_is_a_no_op(self, make_agent):
+        agent, _, _ = make_agent()
+        point = _surveyed_point(agent)
+        agent.set_config({"mode": "base", "active_base_point_id": point["id"]})
+        agent._pending_reconfig = None  # consumed by the serial thread
+        agent.set_config({"mode": "base", "active_base_point_id": point["id"]})
+        assert agent._pending_reconfig is None
+
+    def test_base_reapplied_on_boot(self, make_agent):
+        agent, _, _ = make_agent()
+        point = _surveyed_point(agent)
+        agent.set_config({"mode": "base", "active_base_point_id": point["id"]})
+        rebooted, _, caster = make_agent()
+        assert rebooted._mode == "base-output"
+        assert rebooted._pending_reconfig == ("base", rebooted._base_params)
+        assert rebooted._base_params["lat"] == point["lat"]
+        assert caster.active is True
+        assert rebooted.get_config()["mode"] == "base"
+
+    def test_persisted_base_without_coordinates_falls_back(self, make_agent, tmp_path):
+        state = gr.default_state()
+        state.update(mode="base", active_base_point_id=1, next_point_id=2, points=[
+            {"id": 1, "name": "A", "lat": None, "lng": None}])
+        (tmp_path / "state.json").write_text(json.dumps(state))
+        agent, _, caster = make_agent()
+        assert agent._mode == "capture" and caster.active is False
+        assert agent.get_config()["mode"] == "capture"
+        assert json.loads((tmp_path / "state.json").read_text())["mode"] == "capture"
+
+
+class TestStateFile:
+    def test_missing_file_gives_defaults(self, tmp_path):
+        assert gr.load_state(str(tmp_path / "state.json")) == gr.default_state()
+
+    def test_roundtrip_leaves_no_temp_files(self, tmp_path):
+        path = str(tmp_path / "state.json")
+        state = gr.default_state()
+        state["points"].append({"id": 1, "name": "A"})
+        state["next_point_id"] = 2
+        gr.save_state(path, state)
+        assert gr.load_state(path) == state
+        assert os.listdir(tmp_path) == ["state.json"]
+
+    @pytest.mark.parametrize("content", [
+        "{not json",
+        json.dumps([1, 2]),
+        json.dumps({"mode": "capture", "active_base_point_id": None,
+                    "next_point_id": 1, "points": [{"id": 1, "name": "dup-id-past-next"}]}),
+    ])
+    def test_unusable_file_is_moved_aside(self, tmp_path, content):
+        path = tmp_path / "state.json"
+        path.write_text(content)
+        assert gr.load_state(str(path)) == gr.default_state()
+        assert not path.exists()
+        assert len(list(tmp_path.glob("state.json.corrupt-*"))) == 1
+
+
+class TestLoadConfig:
+    def test_defaults(self):
+        cfg = gr.load_config({"DEVICE_ID": "unit-1"})
+        assert cfg["api_port"] == 10200 and cfg["caster_port"] == 2101
+        assert cfg["caster_mountpoint"] == "FSKBASE"
+        assert cfg["allowed_origins"] == frozenset()
+        assert cfg["device_id"] == "unit-1" and cfg["device_name"] == "unit-1"
+        assert cfg["state_dir"] == "/var/lib/fsk-coursekeeper-gps"
+        assert cfg["meas_rate_ms"] == 100 and cfg["status_interval"] == 1.0
+
+    def test_allowed_origins_list(self):
+        cfg = gr.load_config({"ALLOWED_ORIGINS": "https://a.example, https://b.example/,"})
+        assert cfg["allowed_origins"] == frozenset({"https://a.example", "https://b.example"})
+
+    @pytest.mark.parametrize("env", [
+        {"API_PORT": "0"},
+        {"CASTER_PORT": "abc"},
+        {"CASTER_MOUNTPOINT": "BAD MOUNT"},
+        {"POSITION_REPORT_INTERVAL": "10"},
+    ])
+    def test_invalid(self, env):
+        with pytest.raises(ValueError):
+            gr.load_config(env)
+
+
+class TestTailscaleAddress:
+    @staticmethod
+    def _runner(results):
+        calls = []
+
+        def run(cmd, **kwargs):
+            calls.append(cmd)
+            result = results.pop(0)
+            if isinstance(result, BaseException):
+                raise result
+            return result
+        return run, calls
+
+    def test_not_installed_is_none(self):
+        run, _ = self._runner([FileNotFoundError("tailscale")])
+        assert gr.TailscaleAddress(runner=run).get() is None
+
+    def test_not_up_is_none(self):
+        run, _ = self._runner([subprocess.CompletedProcess(["tailscale"], 1, "", "not running")])
+        assert gr.TailscaleAddress(runner=run).get() is None
+
+    def test_timeout_is_none(self):
+        run, _ = self._runner([subprocess.TimeoutExpired("tailscale", 5)])
+        assert gr.TailscaleAddress(runner=run).get() is None
+
+    def test_address_is_cached(self):
+        run, calls = self._runner([subprocess.CompletedProcess(["tailscale"], 0, "100.101.102.103\n", "")])
+        addr = gr.TailscaleAddress(runner=run, ttl_s=60)
+        assert addr.get() == "100.101.102.103"
+        assert addr.get() == "100.101.102.103"
+        assert calls == [["tailscale", "ip", "-4"]]
+
+    def test_missing_address_is_retried(self):
+        run, calls = self._runner([
+            FileNotFoundError("tailscale"),
+            subprocess.CompletedProcess(["tailscale"], 0, "100.64.0.9\n", ""),
+        ])
+        addr = gr.TailscaleAddress(runner=run, retry_s=0)
+        assert addr.get() is None
+        assert addr.get() == "100.64.0.9"
+        assert len(calls) == 2
