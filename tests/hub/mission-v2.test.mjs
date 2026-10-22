@@ -16,7 +16,7 @@ import {
 setupTestEnv();
 
 import { createCourseApp } from "../../course/index.mjs";
-import { createMissionV2Store, setupMissionV2Schema } from "../../course/lib/mission-v2.mjs";
+import { createMissionV2Store, setupMissionV2Schema } from "../../course/mission-v2.mjs";
 import { validateSupportDatabase } from "../../competition/lib/support-database-validation.mjs";
 
 const requireFromCourse = createRequire(new URL("../../course/package.json", import.meta.url));
@@ -363,7 +363,7 @@ describe("mission route presets", () => {
   });
 
   it("stores arbitrary order and explicit duplicate cone occurrences", async () => {
-    const result = await jsonRequest("post", "/api/rover/mission-presets", {
+    const result = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
       course_id: courseId,
       name: "Reverse with repeat",
       finish_behavior: "return_to_start",
@@ -373,7 +373,7 @@ describe("mission route presets", () => {
     assert.deepEqual(result.data.items.map((item) => item.cone_id), [coneIds[2], coneIds[0], coneIds[2]]);
     assert.equal(result.data.finish_behavior, "return_to_start");
 
-    const duplicateName = await jsonRequest("post", "/api/rover/mission-presets", {
+    const duplicateName = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
       course_id: courseId,
       name: "reverse WITH repeat",
       finish_behavior: "stop",
@@ -383,7 +383,7 @@ describe("mission route presets", () => {
   });
 
   it("marks a preset stale instead of silently dropping a deleted cone", async () => {
-    const created = await jsonRequest("post", "/api/rover/mission-presets", {
+    const created = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
       course_id: courseId,
       name: "Will become stale",
       finish_behavior: "stop",
@@ -392,7 +392,7 @@ describe("mission route presets", () => {
     assert.equal(created.response.status, 201);
     const deleted = await client.delete(`/api/cones/${coneIds[1]}`, { cookie: adminCookie });
     assert.equal(deleted.status, 200);
-    const list = await client.get(`/api/rover/mission-presets?course_id=${courseId}`, { cookie: adminCookie });
+    const list = await client.get(`/api/courses/${courseId}/mission-presets`, { cookie: adminCookie });
     const body = await list.json();
     const stale = body.presets.find((preset) => preset.id === created.data.id);
     assert.equal(stale.stale, true);
@@ -401,7 +401,7 @@ describe("mission route presets", () => {
   });
 
   it("rejects a stale preset revision without overwriting the newer value", async () => {
-    const created = await jsonRequest("post", "/api/rover/mission-presets", {
+    const created = await jsonRequest("post", `/api/courses/${courseId}/mission-presets`, {
       course_id: courseId,
       name: "Preset CAS",
       finish_behavior: "stop",
@@ -409,7 +409,7 @@ describe("mission route presets", () => {
     });
     assert.equal(created.response.status, 201);
     assert.match(created.data.preset_revision, /^[a-f0-9]{64}$/);
-    const updated = await jsonRequest("put", `/api/rover/mission-presets/${created.data.id}`, {
+    const updated = await jsonRequest("put", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
       course_id: courseId,
       name: "Preset CAS current",
       finish_behavior: "stop",
@@ -417,7 +417,7 @@ describe("mission route presets", () => {
       expected_preset_revision: created.data.preset_revision,
     });
     assert.equal(updated.response.status, 200);
-    const stale = await jsonRequest("put", `/api/rover/mission-presets/${created.data.id}`, {
+    const stale = await jsonRequest("put", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
       course_id: courseId,
       name: "Preset CAS stale",
       finish_behavior: "stop",
@@ -426,17 +426,17 @@ describe("mission route presets", () => {
     });
     assert.equal(stale.response.status, 409);
     const list = await (await client.get(
-      `/api/rover/mission-presets?course_id=${courseId}`, { cookie: adminCookie },
+      `/api/courses/${courseId}/mission-presets`, { cookie: adminCookie },
     )).json();
     assert.equal(list.presets.find((preset) => preset.id === created.data.id).name, "Preset CAS current");
 
-    const staleDelete = await jsonRequest("delete", `/api/rover/mission-presets/${created.data.id}`, {
+    const staleDelete = await jsonRequest("delete", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
       expected_preset_revision: created.data.preset_revision,
     });
     assert.equal(staleDelete.response.status, 409);
     assert.equal(staleDelete.data.reason, "preset_revision_mismatch");
     assert.equal(staleDelete.data.current_preset_revision, updated.data.preset_revision);
-    const currentDelete = await jsonRequest("delete", `/api/rover/mission-presets/${created.data.id}`, {
+    const currentDelete = await jsonRequest("delete", `/api/courses/${courseId}/mission-presets/${created.data.id}`, {
       expected_preset_revision: updated.data.preset_revision,
     });
     assert.equal(currentDelete.response.status, 204);

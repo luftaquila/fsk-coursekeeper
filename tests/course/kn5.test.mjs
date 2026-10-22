@@ -11,7 +11,7 @@ import {
   dummyNode,
   translationMatrix,
   IDENTITY,
-} from "../../course/lib/kn5.mjs";
+} from "../../course/kn5.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const fixture = (name) => readFileSync(join(here, "fixtures", name));

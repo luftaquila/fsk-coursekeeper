@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeMapBearing, renderMapBearing, readPublicCoursePreferences, savePublicCoursePreference } from "../../course/web/src/lib/course-view-preferences.mjs";
+import { normalizeMapBearing, renderMapBearing, readPublicCoursePreferences, savePublicCoursePreference } from "../../course/console/lib/course-view-preferences.mjs";
 
 const memoryStorage = () => {
   const values = new Map();

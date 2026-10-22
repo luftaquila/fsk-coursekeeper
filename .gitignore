@@ -1,0 +1,27 @@
+node_modules/
+dist/
+dist-single/
+*.db
+*.db-wal
+*.db-shm
+
+# rover MCU firmware build outputs
+rover/mcu/build*/
+*.uf2
+*.elf
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# KiCad
+.history/
+fp-info-cache
+*-backups/
+*.kicad_prl
+*.kicad_pcb-bak
+*.kicad_sch-bak
+*-save.kicad_pcb
+_autosave-*
+~*.lck

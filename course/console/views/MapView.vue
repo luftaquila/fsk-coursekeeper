@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, nextTick, watch, inject } from "vue";
 import L from "leaflet";
-import { request } from "../api.js";
+import { useHost } from "../host.mjs";
 import { createCourseBaseMap, courseCenterlineLayer } from "../lib/course-map.mjs";
 import { courseDisplayState, courseDirectionOptions } from "../lib/course-display.mjs";
 import CourseMapIcon from "../components/CourseMapIcon.vue";
@@ -57,11 +57,10 @@ import {
   trackManualControlRequest,
   waitForManualControlDrain,
 } from "../lib/mission-session.mjs";
-import { useNotification } from "@shared/browser/useNotification.js";
-import { haversine, formatCoord, formatLatLng, formatAlt } from "@lib/geo.mjs";
-import { resolveCourseRoute, ROUTE_MODE } from "@lib/route-mode.mjs";
-import { buildSideRanks } from "@lib/cone-index.mjs";
-import { permissionComputed } from "@shared/browser/officialsStore.js";
+import { useNotification } from "../notify.mjs";
+import { haversine, formatCoord, formatLatLng, formatAlt } from "../../geo.mjs";
+import { resolveCourseRoute, ROUTE_MODE } from "../../route-mode.mjs";
+import { buildSideRanks } from "../../cone-index.mjs";
 import { useMeasureTools } from "../composables/useMeasureTools.js";
 import { useCourseImportExport } from "../composables/useCourseImportExport.js";
 import { useCourseSnapshots } from "../composables/useCourseSnapshots.js";
@@ -76,8 +75,21 @@ import {
 } from "../lib/cone-render.mjs";
 
 const { success: notifySuccess, error: notifyError, warning: notifyWarn } = useNotification();
-const canOperateRover = permissionComputed("rover.operate");
-const canManageCourse = permissionComputed("course.manage");
+const host = useHost();
+const canOperateRover = host.access.permission("rover.operate");
+const canManageCourse = host.access.permission("course.manage");
+
+// Course data goes to the host; rover and GPS operations go to the selected device.
+const courseRequest = (endpoint, options) => host.course.request(endpoint, options);
+function deviceRequest(kind, missing) {
+  return (endpoint, options) => {
+    const transport = host.devices.transport(kind);
+    if (!transport) return Promise.reject(Object.assign(new Error(missing), { status: 503 }));
+    return transport.request(endpoint, options);
+  };
+}
+const roverRequest = deviceRequest("rover", "No rover is configured.");
+const gpsRequest = deviceRequest("gps", "No GPS unit is configured.");
 const stopping = inject("stopping", ref(false));
 const sseReconnecting = inject("sseReconnecting", ref(false));
 const appRoverConnected = inject("roverConnected", null);
@@ -98,7 +110,7 @@ const loading = ref(true);
 const newCourseName = ref("");
 // Course ZIP export / JSON import lives in a composable; destructured so the
 // template keeps using importInput/exportingId/exportCourse/triggerImport/importCourse by name.
-const { importInput, exportingId, exportCourse, triggerImport, importCourse } = useCourseImportExport({
+const { importInput, exportingId, exportCourse, triggerImport, importCourse } = useCourseImportExport({ request: courseRequest,
   courses, conesMap, memosMap, routeMap, activeCourseId, newCourseName, notifyError,
 });
 const currentSide = ref("left");
@@ -115,7 +127,7 @@ const centerline = ref(null); // computed centerline of the active course: { ok,
 const coneListEl = ref(null);         // cone-list scroll container (for scroll-to-top)
 const coneListScrolled = ref(false);  // true once the list is scrolled down a bit
 const coneFilter = ref("all");
-const CONE_FILTER_LABELS = { all: "전체", left: "L", center: "C", right: "R" };
+const CONE_FILTER_LABELS = { all: "All", left: "L", center: "C", right: "R" };
 const coneFilterLabel = computed(() => CONE_FILTER_LABELS[coneFilter.value] || coneFilter.value);
 
 // Rail icon click just switches tabs; the inspector is always open.
@@ -273,9 +285,9 @@ const coneCaptureIcon = computed(() =>
   : positionSource.value === "rover" ? "🚗"
   : "⚪");
 const coneCaptureTitle = computed(() =>
-  positionSource.value === "receiver" ? "GPS 수신기 위치로 콘 추가 (수신기 우선 사용 중)"
-  : positionSource.value === "rover" ? "로버 GPS 위치로 콘 추가"
-  : "GPS 소스 없음 — 수신기 또는 로버 연결 필요");
+  positionSource.value === "receiver" ? "Add cone at the GPS unit position (GPS unit preferred)"
+  : positionSource.value === "rover" ? "Add cone at the rover GPS position"
+  : "No GPS source — connect a GPS unit or the rover");
 
 let manualFailCount = 0;
 
@@ -431,7 +443,7 @@ const batteryChip = computed(() => {
   if (s.battery.gain != null) rows.push(["GAIN", s.battery.gain.toFixed(4)]);
   if (s.battery.calibrated_at) {
     const ago = Math.max(0, Math.round((Date.now() - s.battery.calibrated_at) / 60000));
-    rows.push(["FIX", ago < 1 ? "방금" : ago < 60 ? `${ago}분 전` : `${Math.round(ago / 60)}시간 전`]);
+    rows.push(["FIX", ago < 1 ? "just now" : ago < 60 ? `${ago} min ago` : `${Math.round(ago / 60)} h ago`]);
   }
   return { percent: p, voltage: s.battery.voltage, tone, rows };
 });
@@ -439,11 +451,11 @@ const batteryChip = computed(() => {
 // Nav-light pattern selector. Operator picks here; the server persists the
 // choice and re-sends it to the rover on (re)connect so it sticks.
 const NAV_LIGHT_MODES = [
-  { mode: 0, label: "꺼짐", short: "OFF" },
-  { mode: 1, label: "상시 점등", short: "STEADY" },
-  { mode: 2, label: "더블 스트로브", short: "STROBE2" },
-  { mode: 3, label: "1회 스트로브", short: "STROBE1" },
-  { mode: 4, label: "50% 점멸", short: "BLINK" },
+  { mode: 0, label: "Off", short: "OFF" },
+  { mode: 1, label: "Steady", short: "STEADY" },
+  { mode: 2, label: "Double strobe", short: "STROBE2" },
+  { mode: 3, label: "Single strobe", short: "STROBE1" },
+  { mode: 4, label: "50% blink", short: "BLINK" },
 ];
 const navLightsChip = computed(() => {
   const s = roverStatus.value;
@@ -456,11 +468,11 @@ async function setNavLights(mode) {
   if (navLightsBusy.value) return;
   navLightsBusy.value = true;
   try {
-    await request("/api/rover/nav-lights", { method: "POST", body: JSON.stringify({ mode }) });
+    await roverRequest("/api/rover/nav-lights", { method: "POST", body: JSON.stringify({ mode }) });
     roverStatus.value = { ...roverStatus.value, nav_lights_mode: mode };
     activeChipPopover.value = null;
   } catch (err) {
-    notifyError(`nav 라이트 설정 실패: ${err.message}`);
+    notifyError(`Failed to set nav lights: ${err.message}`);
   } finally {
     navLightsBusy.value = false;
   }
@@ -476,15 +488,15 @@ function onLedBrightnessInput(val) {
   ledBrightness.value = Number(val);
   if (ledBrightnessTimer) clearTimeout(ledBrightnessTimer);
   ledBrightnessTimer = setTimeout(() => {
-    request("/api/rover/led-brightness", {
+    roverRequest("/api/rover/led-brightness", {
       method: "POST",
       body: JSON.stringify({ brightness: ledBrightness.value }),
-    }).catch((err) => notifyError(`TSAL 밝기 설정 실패: ${err.message}`));
+    }).catch((err) => notifyError(`Failed to set TSAL brightness: ${err.message}`));
   }, 200);
 }
 
-// Peristaltic pump: manual on/off toggle (수동제어 PUMP button) + dispense-time
-// slider (분사 시간, in the 💡 popover). Both mirror server rover status.
+// Peristaltic pump: manual on/off toggle (manual-control PUMP button) + dispense-time
+// slider ("Dispense time", in the 💡 popover). Both mirror server rover status.
 const pumpOn = computed(() => roverStatus.value.pump_on === true);
 const pumpDuration = ref(2.0);
 watch(() => roverStatus.value.pump_run_duration, (v) => {
@@ -495,10 +507,10 @@ function onPumpDurationInput(val) {
   pumpDuration.value = Number(val);
   if (pumpDurationTimer) clearTimeout(pumpDurationTimer);
   pumpDurationTimer = setTimeout(() => {
-    request("/api/rover/pump-duration", {
+    roverRequest("/api/rover/pump-duration", {
       method: "POST",
       body: JSON.stringify({ seconds: pumpDuration.value }),
-    }).catch((err) => notifyError(`분사 시간 설정 실패: ${err.message}`));
+    }).catch((err) => notifyError(`Failed to set dispense time: ${err.message}`));
   }, 200);
 }
 
@@ -509,15 +521,15 @@ const missionChip = computed(() => {
     && pathStart && pathReturnOrigin;
   if (pathWaypoints.value.length === 0 && !returnOnly) return null;
   const lines = [returnOnly
-    ? `최초 미션 시작점 복귀: ${pathProgress.value}%`
-    : `미션 진행: ${executedIndex.value} / ${pathWaypoints.value.length} (${pathProgress.value}%)`];
+    ? `Returning to mission start: ${pathProgress.value}%`
+    : `Mission progress: ${executedIndex.value} / ${pathWaypoints.value.length} (${pathProgress.value}%)`];
   if (remainingDistanceM.value != null) {
-    lines.push(`남은 거리: ${remainingDistanceM.value >= 1000
+    lines.push(`Remaining distance: ${remainingDistanceM.value >= 1000
       ? (remainingDistanceM.value / 1000).toFixed(2) + " km"
       : remainingDistanceM.value.toFixed(1) + " m"}`);
   }
-  if (missionETA.value) lines.push(`예상 완료: ${missionETA.value} 후`);
-  if (roverStatus.value.gps?.speed != null) lines.push(`현재 속도: ${roverStatus.value.gps.speed.toFixed(2)} m/s`);
+  if (missionETA.value) lines.push(`Est. completion in ${missionETA.value}`);
+  if (roverStatus.value.gps?.speed != null) lines.push(`Current speed: ${roverStatus.value.gps.speed.toFixed(2)} m/s`);
   return {
     current: returnOnly ? 0 : executedIndex.value,
     total: returnOnly ? 0 : pathWaypoints.value.length,
@@ -615,10 +627,10 @@ const remainingDistanceM = computed(() => {
 
 // Rover control/history/GPS are independent from course editing.
 const INSPECTOR_TABS = [
-  { key: "rover", label: "로버", icon: "🚗", roverOnly: true },
+  { key: "rover", label: "Rover", icon: "🚗", roverOnly: true },
   { key: "gps", label: "GPS", icon: "🛰️", roverOnly: true },
-  { key: "courses", label: "코스", icon: "📋" },
-  { key: "history", label: "기록", icon: "📊", roverOnly: true },
+  { key: "courses", label: "Courses", icon: "📋" },
+  { key: "history", label: "History", icon: "📊", roverOnly: true },
 ];
 const visibleTabs = computed(() => INSPECTOR_TABS.filter((t) => canOperateRover.value || !t.roverOnly));
 
@@ -637,7 +649,7 @@ const replayIdx = ref(0);
 const replaySpeed = ref(1);
 let playTimer = null;
 
-const MISSION_STATUS_LABEL = { running: "진행 중", paused: "일시정지", interrupted: "중단됨", completed: "완료", stopped: "정지됨", error: "오류" };
+const MISSION_STATUS_LABEL = { running: "Running", paused: "Paused", interrupted: "Interrupted", completed: "Completed", stopped: "Stopped", error: "Error" };
 const MISSION_STATUS_COLOR = { running: "#3b82f6", paused: "#a855f7", interrupted: "#f97316", completed: "#22c55e", stopped: "#f59e0b", error: "#ef4444" };
 
 function formatMissionDuration(started, ended) {
@@ -655,7 +667,7 @@ function formatMissionTimestamp(ms) {
 async function loadMissions() {
   missionLoading.value = true;
   try {
-    const res = await request(`/api/missions?limit=${missionPage}&offset=0`);
+    const res = await roverRequest(`/api/missions?limit=${missionPage}&offset=0`);
     const data = await res.json();
     missions.value = data.missions || [];
     missionTotal.value = data.total || 0;
@@ -666,7 +678,7 @@ async function loadMoreMissions() {
   if (missionLoadingMore.value || missions.value.length >= missionTotal.value) return;
   missionLoadingMore.value = true;
   try {
-    const res = await request(`/api/missions?limit=${missionPage}&offset=${missions.value.length}`);
+    const res = await roverRequest(`/api/missions?limit=${missionPage}&offset=${missions.value.length}`);
     const data = await res.json();
     missions.value = [...missions.value, ...(data.missions || [])];
     missionTotal.value = data.total || missions.value.length;
@@ -680,8 +692,8 @@ async function selectMission(id) {
   stopReplay();
   try {
     const [d, t] = await Promise.all([
-      request(`/api/missions/${id}`).then((r) => r.json()),
-      request(`/api/missions/${id}/telemetry`).then((r) => r.json()),
+      roverRequest(`/api/missions/${id}`).then((r) => r.json()),
+      roverRequest(`/api/missions/${id}/telemetry`).then((r) => r.json()),
     ]);
     missionDetail.value = d;
     missionSamples.value = t.samples || [];
@@ -979,7 +991,7 @@ watch(baseNoReceiver, (now, prev) => {
   // Admin-only feature: only the operator who can set/fix the base source should
   // get this toast (the persistent banner lives in the admin GPS tab anyway).
   if (now && !prev && canOperateRover.value) {
-    notifyWarn("GPS 수신기가 연결되지 않았습니다. 로버에 RTK 보정이 전달되지 않습니다.");
+    notifyWarn("The GPS unit is not connected. RTK corrections are not reaching the rover.");
   }
 });
 
@@ -996,13 +1008,13 @@ watch([gpsConfig, surveyedPoints], () => {
 async function loadGps() {
   try {
     const [cfgRes, spRes] = await Promise.all([
-      request("/api/gps/config"),
-      request("/api/gps/survey-points"),
+      gpsRequest("/api/gps/config"),
+      gpsRequest("/api/gps/survey-points"),
     ]);
     gpsConfig.value = await cfgRes.json();
     surveyPoints.value = (await spRes.json()).points || [];
   } catch (err) {
-    notifyError(err.message || "GPS 설정을 불러오지 못했습니다.");
+    notifyError(err.message || "Failed to load GPS settings.");
   }
 }
 
@@ -1010,16 +1022,16 @@ async function setNtripSource(source, pointId = null) {
   const body = { ntrip_source: source };
   if (source === "base") {
     const pid = pointId != null ? pointId : (selectedBasePointId.value ?? gpsConfig.value.active_base_point_id);
-    if (pid == null) { notifyError("먼저 측량점을 선택하세요."); return; }
+    if (pid == null) { notifyError("Select a survey point first."); return; }
     body.active_base_point_id = pid;
   }
   gpsSaving.value = true;
   try {
-    const res = await request("/api/gps/config", { method: "PUT", body: JSON.stringify(body) });
+    const res = await gpsRequest("/api/gps/config", { method: "PUT", body: JSON.stringify(body) });
     gpsConfig.value = await res.json();
-    notifySuccess(source === "base" ? "수신기를 기준국으로 설정했습니다." : "NGII 보정 소스로 전환했습니다.");
+    notifySuccess(source === "base" ? "Set the GPS unit as the base station." : "Switched corrections to NGII.");
   } catch (err) {
-    notifyError(err.message || "GPS 소스 변경에 실패했습니다.");
+    notifyError(err.message || "Failed to change the GPS source.");
   } finally {
     gpsSaving.value = false;
   }
@@ -1029,42 +1041,42 @@ async function addSurveyPoint() {
   const name = newSurveyName.value.trim();
   if (!name) return;
   try {
-    await request("/api/gps/survey-points", { method: "POST", body: JSON.stringify({ name }) });
+    await gpsRequest("/api/gps/survey-points", { method: "POST", body: JSON.stringify({ name }) });
     newSurveyName.value = "";
     await loadGps();
   } catch (err) {
-    notifyError(err.message || "측량점 추가에 실패했습니다.");
+    notifyError(err.message || "Failed to add the survey point.");
   }
 }
 
 async function deleteSurveyPoint(p) {
-  if (!window.confirm(`측량점 "${p.name}"을(를) 삭제할까요?`)) return;
+  if (!window.confirm(`Delete survey point "${p.name}"?`)) return;
   try {
-    await request(`/api/gps/survey-points/${p.id}`, { method: "DELETE" });
+    await gpsRequest(`/api/gps/survey-points/${p.id}`, { method: "DELETE" });
     if (selectedSurveyPointId.value === p.id) selectedSurveyPointId.value = null;
     await loadGps();
   } catch (err) {
-    notifyError(err.message || "측량점 삭제에 실패했습니다.");
+    notifyError(err.message || "Failed to delete the survey point.");
   }
 }
 
 async function startSurvey(p) {
   try {
-    await request(`/api/gps/survey-points/${p.id}/survey`, {
+    await gpsRequest(`/api/gps/survey-points/${p.id}/survey`, {
       method: "POST",
       body: JSON.stringify({ duration_s: surveyDuration.value }),
     });
-    notifySuccess(`"${p.name}" 측량을 시작했습니다.`);
+    notifySuccess(`Started surveying "${p.name}".`);
   } catch (err) {
-    notifyError(err.message || "측량 시작에 실패했습니다.");
+    notifyError(err.message || "Failed to start the survey.");
   }
 }
 
 async function cancelSurvey(p) {
   try {
-    await request(`/api/gps/survey-points/${p.id}/survey/cancel`, { method: "POST" });
+    await gpsRequest(`/api/gps/survey-points/${p.id}/survey/cancel`, { method: "POST" });
   } catch (err) {
-    notifyError(err.message || "측량 취소에 실패했습니다.");
+    notifyError(err.message || "Failed to cancel the survey.");
   }
 }
 
@@ -1216,7 +1228,7 @@ let missionAuthorityGeneration = 0;
 const activeMissionAuthority = ref(null);
 let observedMissionAuthorityKey = missionAuthorityKey(null);
 const terminalMissionIds = new Set();
-let eventSource = null;
+let eventStreams = [];
 let controlInterval = null;
 const pendingManualControlRequests = new Set();
 let suppressRebuild = false;
@@ -1318,7 +1330,7 @@ function beginMissionAuthorityRequest(mission = activeMissionAuthority.value) {
     mission,
   });
   if (!token) {
-    throw Object.assign(new Error("현재 미션 권위를 확인할 수 없습니다. 최신 상태를 다시 불러오세요."), {
+    throw Object.assign(new Error("Cannot confirm the current mission authority. Reload the latest state."), {
       reason: "mission_authority_unavailable",
     });
   }
@@ -1371,7 +1383,7 @@ function resolveMissionHttpSnapshot(responseMission, token, options = {}) {
 }
 
 function missionAuthorityAdvancedError(token) {
-  return Object.assign(new Error("요청 중 미션 상태가 변경되었습니다. 최신 상태를 확인하세요."), {
+  return Object.assign(new Error("The mission changed during the request. Check the latest state."), {
     reason: "mission_authority_advanced",
     missionAuthorityRequestToken: token,
   });
@@ -1395,24 +1407,24 @@ const pathBtnLabel = computed(() => {
   // 텔레메트리로 확인될 때까지 같은 상태로 보여야 운영자가 두 버튼을 보고
   // 모순된 단계로 오해하지 않는다.
   if (stopping.value && (roverMode.value === "executing" || roverMode.value === "stopped")) {
-    return "정지 요청 중...";
+    return "Requesting stop...";
   }
   if (emergencyStopLatched.value && (roverMode.value === "stopped" || roverMode.value === "path-ready")) {
-    return "비상정지 해제 필요";
+    return "Release E-stop first";
   }
   if (roverMode.value === "executing") {
     // 일시정지 중에는 메인 버튼이 상태만 표시하고, 재개는 전용 버튼이 담당.
-    if (roverStatus.value.nav_state === "PAUSED") return "일시정지됨";
-    // executePath 직후 nav_state 가 IDLE 인 ~수초 동안은 0% 가 아니라 "시작
-    // 요청 중..." 으로 노출. rover 가 CALIBRATING 으로 들어가면 화해 함수가
+    if (roverStatus.value.nav_state === "PAUSED") return "Paused";
+    // executePath 직후 nav_state 가 IDLE 인 ~수초 동안은 0% 가 아니라
+    // "Requesting start..." 로 노출. rover 가 CALIBRATING 으로 들어가면 화해 함수가
     // 진행률 라벨을 자동 갱신.
-    if (!ACTIVE_NAV_STATES.has(roverStatus.value.nav_state)) return "시작 요청 중...";
-    return `실행 중 ${pathProgress.value}%`;
+    if (!ACTIVE_NAV_STATES.has(roverStatus.value.nav_state)) return "Requesting start...";
+    return `Running ${pathProgress.value}%`;
   }
-  if (roverMode.value === "stopped") return activeMission.value?.status === "ready" ? "미션 시작" : "이어서 실행";
-  if (roverMode.value === "path-ready") return "경로 실행";
-  if (roverMode.value === "path-pick") return "계산 취소";
-  return "경로 계산";
+  if (roverMode.value === "stopped") return activeMission.value?.status === "ready" ? "Start mission" : "Resume mission";
+  if (roverMode.value === "path-ready") return "Run route";
+  if (roverMode.value === "path-pick") return "Cancel planning";
+  return "Plan route";
 });
 
 const pathBtnClass = computed(() => {
@@ -1454,35 +1466,35 @@ const preflightChecks = computed(() => {
     returnPoint: activeMission.value?.start_position || s.last_position,
   });
   return [
-    { key: "connected", label: "로버 SSE 연결", ok: !!s.connected, blocking: true },
-    { key: "estop", label: "비상정지 해제", ok: !emergencyStopLatched.value, blocking: true,
-      detail: emergencyStopLatched.value ? "비상정지가 래치되어 있습니다. 먼저 물리 상태를 확인하고 해제하세요." : "해제됨" },
-    { key: "protocol", label: "미션 프로토콜 v2", ok: s.mission_protocol?.compatible === true, blocking: true,
+    { key: "connected", label: "Rover SSE connection", ok: !!s.connected, blocking: true },
+    { key: "estop", label: "E-stop released", ok: !emergencyStopLatched.value, blocking: true,
+      detail: emergencyStopLatched.value ? "E-stop is latched. Check the physical state, then release it." : "Released" },
+    { key: "protocol", label: "Mission protocol v2", ok: s.mission_protocol?.compatible === true, blocking: true,
       detail: s.mission_protocol?.connected == null
-        ? "버전 미수신"
+        ? "Version not received"
         : `rover v${s.mission_protocol.connected} / required v${s.mission_protocol.required}` },
     { key: "fix", label: "RTK Fixed GPS", ok: s.fix_status === "rtk_fixed",
-      detail: s.fix_status ? s.fix_status.replace(/_/g, " ").toUpperCase() : "알 수 없음" },
-    { key: "ntrip", label: "NTRIP 연결", ok: s.ntrip_connected === true,
+      detail: s.fix_status ? s.fix_status.replace(/_/g, " ").toUpperCase() : "Unknown" },
+    { key: "ntrip", label: "NTRIP connection", ok: s.ntrip_connected === true,
       detail: (() => {
-        if (s.ntrip_connected === null) return "알 수 없음";
+        if (s.ntrip_connected === null) return "Unknown";
         const caster = s.ntrip?.host ? `${s.ntrip.host}${s.ntrip.mountpoint ? '/' + s.ntrip.mountpoint : ''}` : null;
         if (s.ntrip_connected) return caster ? `${caster} · ok` : "ok";
-        const retry = s.ntrip?.fail_count ? ` · 재시도 ${s.ntrip.fail_count}` : "";
+        const retry = s.ntrip?.fail_count ? ` · retries ${s.ntrip.fail_count}` : "";
         return caster ? `${caster} · off${retry}` : `off${retry}`;
       })() },
-    { key: "firstwp", label: resolvingUncertain ? "불확실 분사 결과 해소"
-      : (returningOnly ? "시작점 복귀 거리" : "첫 웨이포인트 거리"),
+    { key: "firstwp", label: resolvingUncertain ? "Resolve uncertain dispense result"
+      : (returningOnly ? "Distance to start point" : "Distance to first waypoint"),
       ok: missionPreflightDistanceAllowed({ kind: targetDecision.kind, distance: firstDist }),
-      detail: resolvingUncertain ? "추가 이동·재분사 없이 운영자가 결과 불확실성을 해소합니다."
-        : (firstDist != null ? `${firstDist.toFixed(1)} m${returningOnly ? " · 최초 미션 시작점" : ""}` : "위치 미수신") },
-    { key: "route", label: "경로 구간 거리", ok: routeCheck.ok,
-      detail: routeCheck.ok ? "모든 구간 50 m 이내"
+      detail: resolvingUncertain ? "The operator resolves the uncertain result without further movement or dispensing."
+        : (firstDist != null ? `${firstDist.toFixed(1)} m${returningOnly ? " · mission start point" : ""}` : "No position received") },
+    { key: "route", label: "Route segment distance", ok: routeCheck.ok,
+      detail: routeCheck.ok ? "All segments within 50 m"
         : (Number.isFinite(routeCheck.distance)
-          ? `${routeCheck.reason === "return_segment_too_long" ? "복귀 구간" : `${routeCheck.index + 1}번 콘까지`} ${routeCheck.distance.toFixed(1)} m`
-          : "경로 좌표 확인 필요") },
-    { key: "battery", label: "배터리", ok: batteryOk,
-      detail: s.battery && s.battery.percent != null ? `${s.battery.percent}%` : "미수신" },
+          ? `${routeCheck.reason === "return_segment_too_long" ? "Return segment" : `To cone ${routeCheck.index + 1}`}: ${routeCheck.distance.toFixed(1)} m`
+          : "Check route coordinates") },
+    { key: "battery", label: "Battery", ok: batteryOk,
+      detail: s.battery && s.battery.percent != null ? `${s.battery.percent}%` : "Not received" },
   ];
 });
 const preflightAllOk = computed(() => preflightChecks.value.every((c) => c.ok));
@@ -1545,25 +1557,25 @@ const routeMarkerById = computed(() => new Map(activeRoute.value.markers.map((ma
 // start and the travel direction — whether they merely orient the loop or need
 // the marker router. `routeMode` records which of the two actually ran.
 const hasMarkerRoute = computed(() => activeRoute.value.steps.length >= 2);
-// An oriented route is still the automatic centerline; only saying "마커 경로"
+// An oriented route is still the automatic centerline; only saying "Marker route"
 // there would suggest the marker router drew it.
 const ROUTE_MODE_LABEL = {
-  [ROUTE_MODE.AUTO]: "자동 중심선",
-  [ROUTE_MODE.ORIENTED]: "자동 중심선 · 마커 기준",
-  [ROUTE_MODE.GUIDED]: "마커 경로",
+  [ROUTE_MODE.AUTO]: "Auto centerline",
+  [ROUTE_MODE.ORIENTED]: "Auto centerline · marker-oriented",
+  [ROUTE_MODE.GUIDED]: "Marker route",
 };
 const routeModeLabel = computed(() => ROUTE_MODE_LABEL[routeMode.value] || ROUTE_MODE_LABEL[ROUTE_MODE.AUTO]);
 const ROUTE_MODE_SUFFIX = {
   [ROUTE_MODE.AUTO]: "",
-  [ROUTE_MODE.ORIENTED]: " · 마커 기준",
-  [ROUTE_MODE.GUIDED]: " · 마커 경로",
+  [ROUTE_MODE.ORIENTED]: " · marker-oriented",
+  [ROUTE_MODE.GUIDED]: " · marker route",
 };
 const routeModeSuffix = computed(() => ROUTE_MODE_SUFFIX[routeMode.value] ?? "");
 
 async function fetchRoute(courseId) {
   if (!courseId) return;
   try {
-    const res = await request(`/api/courses/${courseId}/route`);
+    const res = await courseRequest(`/api/courses/${courseId}/route`);
     routeMap.value[courseId] = await res.json();
   } catch (err) {
     notifyError(err.message);
@@ -1575,7 +1587,7 @@ async function addRouteMarker(lat, lng) {
   if (!courseId) return;
   try {
     const n = activeRoute.value.markers.length + 1;
-    await request(`/api/courses/${courseId}/route/markers`, {
+    await courseRequest(`/api/courses/${courseId}/route/markers`, {
       method: "POST",
       body: JSON.stringify({ lat, lng, label: `M${n}` }),
     });
@@ -1585,7 +1597,7 @@ async function addRouteMarker(lat, lng) {
 
 async function updateRouteMarker(marker, patch) {
   try {
-    await request(`/api/route/markers/${marker.id}`, { method: "PATCH", body: JSON.stringify(patch) });
+    await courseRequest(`/api/route/markers/${marker.id}`, { method: "PATCH", body: JSON.stringify(patch) });
     await fetchRoute(marker.course_id);
   } catch (err) {
     notifyError(err.message);
@@ -1595,9 +1607,9 @@ async function updateRouteMarker(marker, patch) {
 }
 
 async function deleteRouteMarker(marker) {
-  if (!confirm(`주행 마커 "${marker.label || marker.id}"와 모든 방문 단계를 삭제하시겠습니까?`)) return;
+  if (!confirm(`Delete route marker "${marker.label || marker.id}" and all of its visits?`)) return;
   try {
-    const res = await request(`/api/route/markers/${marker.id}`, { method: "DELETE" });
+    const res = await courseRequest(`/api/route/markers/${marker.id}`, { method: "DELETE" });
     routeMap.value[marker.course_id] = await res.json();
   } catch (err) { notifyError(err.message); }
 }
@@ -1606,7 +1618,7 @@ async function saveRouteSteps(steps) {
   const courseId = activeCourseId.value;
   if (!courseId) return;
   try {
-    const res = await request(`/api/courses/${courseId}/route/steps`, {
+    const res = await courseRequest(`/api/courses/${courseId}/route/steps`, {
       method: "PUT", body: JSON.stringify({ steps }),
     });
     routeMap.value[courseId] = await res.json();
@@ -1671,7 +1683,7 @@ const selectedCone = computed(() =>
   selectedConeId.value ? activeCones.value.find((c) => c.id === selectedConeId.value) : null
 );
 
-/* ── Course centerline (ported from centerline.py → course/lib/centerline.mjs) ──
+/* ── Course centerline (ported from centerline.py → course/centerline.mjs) ──
    Computed client-side from the active course's cones; the toggle only controls
    the on-map graphic, not the (always-computed) header length. Recompute is
    debounced and rides cone/course changes (edit commit / SSE), never mid-drag. */
@@ -1763,7 +1775,7 @@ async function saveCourseDirection(id, patch) {
   if ("start_cone_id" in patch) next.start_cone_id = patch.start_cone_id;
   courses.value[i] = next;
   try {
-    await request(`/api/courses/${id}/direction`, {
+    await courseRequest(`/api/courses/${id}/direction`, {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
@@ -1775,7 +1787,7 @@ async function saveCourseDirection(id, patch) {
       if ("start_cone_id" in patch) rolled.start_cone_id = before.start_cone_id;
       courses.value[j] = rolled;
     }
-    notifyWarn(err.message || "진행 방향을 저장하지 못했습니다.");
+    notifyWarn(err.message || "Failed to save the travel direction.");
   }
 }
 // Set the selected cone as the start (or clear it back to the auto start gate).
@@ -1959,16 +1971,16 @@ function rebuildAllMarkers(onlyCourseId = null) {
 
             try {
               await Promise.all(updates.map(u =>
-                request(`/api/cones/${u.id}`, {
+                courseRequest(`/api/cones/${u.id}`, {
                   method: "PATCH",
                   body: JSON.stringify({ lat: u.lat, lng: u.lng }),
                 })
               ));
-              pushUndo(`콘 ${before.length}개 이동`, () => Promise.all(
-                before.map((b) => request(`/api/cones/${b.id}`, { method: "PATCH", body: JSON.stringify({ lat: b.lat, lng: b.lng }) }))
+              pushUndo(`Move ${before.length} cones`, () => Promise.all(
+                before.map((b) => courseRequest(`/api/cones/${b.id}`, { method: "PATCH", body: JSON.stringify({ lat: b.lat, lng: b.lng }) }))
               ));
             } catch (err) {
-              notifyError(`콘 위치 저장 실패: ${err.message}`);
+              notifyError(`Failed to save cone position: ${err.message}`);
               marker.setLatLng([cone.lat, cone.lng]);
               for (const [id, origPos] of rollbackPositions || []) {
                 const key = `${activeCourseId.value}-${id}`;
@@ -1983,10 +1995,10 @@ function rebuildAllMarkers(onlyCourseId = null) {
             const before = { lat: cone.lat, lng: cone.lng };
             const { lat, lng } = marker.getLatLng();
             try {
-              await request(`/api/cones/${cone.id}`, { method: "PATCH", body: JSON.stringify({ lat, lng }) });
-              pushUndo("콘 이동", () => request(`/api/cones/${cone.id}`, { method: "PATCH", body: JSON.stringify({ lat: before.lat, lng: before.lng }) }));
+              await courseRequest(`/api/cones/${cone.id}`, { method: "PATCH", body: JSON.stringify({ lat, lng }) });
+              pushUndo("Move cone", () => courseRequest(`/api/cones/${cone.id}`, { method: "PATCH", body: JSON.stringify({ lat: before.lat, lng: before.lng }) }));
             } catch (err) {
-              notifyError(`콘 위치 저장 실패: ${err.message}`);
+              notifyError(`Failed to save cone position: ${err.message}`);
               marker.setLatLng([cone.lat, cone.lng]);
             }
           }
@@ -2199,12 +2211,12 @@ watch(activeCourseId, async (v, prev) => {
   // 취소하거나 서버 종료가 실패하면 전환 자체를 이전 코스로 되돌린다.
   if (shouldAbandonMissionForCourseSwitch({ missionAlignment, roverMode: roverMode.value })) {
     const revert = () => { revertingCourseSwitch = true; activeCourseId.value = prev; };
-    if (!window.confirm("코스를 전환하면 진행 중인 미션을 종료하고 폐기합니다.\n'이어서 실행'할 수 없게 됩니다. 계속하시겠습니까?")) { revert(); return; }
+    if (!window.confirm("Switching courses ends and discards the current mission.\nIt can no longer be resumed. Continue?")) { revert(); return; }
     const missionId = activeMissionAuthority.value?.id;
     if (missionId) {
       revert();
       if (missionEndBusy.value || missionEndAwaitingAckId.value === missionId) {
-        notifyWarn("로버의 미션 종료 확인을 기다리고 있습니다.");
+        notifyWarn("Waiting for the rover to confirm the mission end.");
         return;
       }
       missionEndBusy.value = true;
@@ -2214,14 +2226,14 @@ watch(activeCourseId, async (v, prev) => {
       let authorityToken = null;
       try {
         authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-        const response = await request(`/api/missions/${missionId}/end`, { method: "POST" });
+        const response = await roverRequest(`/api/missions/${missionId}/end`, { method: "POST" });
         const data = await response.json();
         if (applyMissionCommandResponse(data, "end", authorityToken)) {
-          notifyWarn("로버의 미션 종료 확인 후 코스를 다시 전환하세요.");
+          notifyWarn("Switch courses again after the rover confirms the mission end.");
         }
       } catch (err) {
         await reconcileMissionEndRequestFailure(missionId);
-        notifyWarn(`미션 종료 실패: ${err.message}`);
+        notifyWarn(`Failed to end mission: ${err.message}`);
       } finally {
         missionEndBusy.value = false;
       }
@@ -2263,16 +2275,16 @@ watch(activeCourseId, async (v, prev) => {
 /* ── Data fetch ───────────────────────────────────── */
 async function fetchAll() {
   try {
-    const res = await request("/api/courses");
+    const res = await courseRequest("/api/courses");
     courses.value = await res.json();
     // Load every course's cones + memos concurrently. The old loop blocked each
     // course on the previous one (1 + 2N serial round-trips); fan them out so
     // first paint waits only on the slowest single course, not their sum.
     await Promise.all(courses.value.map(async (c) => {
       const [cones, memos, route] = await Promise.all([
-        request(`/api/courses/${c.id}/cones`).then((r) => r.json()).catch(() => []),
-        request(`/api/courses/${c.id}/memos`).then((r) => r.json()).catch(() => []),
-        request(`/api/courses/${c.id}/route`).then((r) => r.json()).catch(() => ({ markers: [], steps: [] })),
+        courseRequest(`/api/courses/${c.id}/cones`).then((r) => r.json()).catch(() => []),
+        courseRequest(`/api/courses/${c.id}/memos`).then((r) => r.json()).catch(() => []),
+        courseRequest(`/api/courses/${c.id}/route`).then((r) => r.json()).catch(() => ({ markers: [], steps: [] })),
       ]);
       conesMap.value[c.id] = cones;
       memosMap.value[c.id] = memos;
@@ -2358,10 +2370,10 @@ function onMapClick(e) {
     clearPath();
     return;
   }
-  // 'stopped' = 비상정지/중단으로 서버에 보존된 재개 가능한 미션("이어서 실행").
+  // 'stopped' = 비상정지/중단으로 서버에 보존된 재개 가능한 미션("Resume mission").
   // 여기서 clearPath()가 돌면 /api/rover/end-mission 이 POST 되어 미션이 폐기되고
   // 재개가 불가능해진다. 실수 탭 하나가 미션을 날리지 않도록 무시하고(executing 과
-  // 동일), 폐기는 전용 "미션 종료" 버튼으로만 수행한다.
+  // 동일), 폐기는 전용 "End mission" 버튼으로만 수행한다.
   if (roverMode.value === "stopped") return;
   if (roverMode.value === "executing") return;
   if (routeEditMode.value) {
@@ -2503,7 +2515,7 @@ async function createCourse() {
   const name = newCourseName.value.trim();
   if (!name) return;
   try {
-    const res = await request("/api/courses", { method: "POST", body: JSON.stringify({ name }) });
+    const res = await courseRequest("/api/courses", { method: "POST", body: JSON.stringify({ name }) });
     const created = await res.json();
     newCourseName.value = "";
     activeCourseId.value = created.id;
@@ -2514,13 +2526,13 @@ async function togglePublication(course) {
   if (!canManageCourse.value || publishingId.value != null) return;
   publishingId.value = course.id;
   try {
-    const response = await request(`/api/courses/${course.id}/publication`, {
+    const response = await courseRequest(`/api/courses/${course.id}/publication`, {
       method: "PATCH", body: JSON.stringify({ is_public: !course.is_public }),
     });
     const updated = await response.json();
     const row = courses.value.find((c) => c.id === course.id);
     if (row) row.is_public = updated.is_public;
-    notifySuccess(updated.is_public ? "경기 코스에 공개했습니다." : "경기 코스 공개를 해제했습니다.");
+    notifySuccess(updated.is_public ? "Course published." : "Course unpublished.");
   } catch (error) { notifyError(error.message); }
   finally { publishingId.value = null; }
 }
@@ -2538,16 +2550,16 @@ async function saveCourseName(id) {
   const name = editCourseName.value.trim();
   if (!name) return;
   try {
-    await request(`/api/courses/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
+    await courseRequest(`/api/courses/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
     editingCourseId.value = null;
   } catch (err) { notifyError(err.message); }
 }
 
 async function deleteCourse(id) {
   const course = courses.value.find((c) => c.id === id);
-  if (!confirm(`"${course?.name}" 코스를 삭제하시겠습니까?`)) return;
+  if (!confirm(`Delete course "${course?.name}"?`)) return;
   try {
-    await request(`/api/courses/${id}`, { method: "DELETE" });
+    await courseRequest(`/api/courses/${id}`, { method: "DELETE" });
     if (activeCourseId.value === id) {
       activeCourseId.value = courses.value.find((c) => c.id !== id)?.id || null;
     }
@@ -2579,20 +2591,20 @@ const wheelCalCanStart = computed(() => {
 });
 
 const antennaCalBtnLabel = computed(() => {
-  if (antennaCalRunning.value) return "진행 중";
-  if (!roverStatus.value.connected) return "로버 연결 필요";
+  if (antennaCalRunning.value) return "Running";
+  if (!roverStatus.value.connected) return "Rover not connected";
   if (roverStatus.value.nav_state && roverStatus.value.nav_state !== "IDLE") {
-    return "IDLE 상태에서만 가능";
+    return "Only available when IDLE";
   }
-  return "시작";
+  return "Start";
 });
 const wheelCalBtnLabel = computed(() => {
-  if (wheelCalRunning.value) return "진행 중";
-  if (!roverStatus.value.connected) return "로버 연결 필요";
+  if (wheelCalRunning.value) return "Running";
+  if (!roverStatus.value.connected) return "Rover not connected";
   if (roverStatus.value.nav_state && roverStatus.value.nav_state !== "IDLE") {
-    return "IDLE 상태에서만 가능";
+    return "Only available when IDLE";
   }
-  return "시작";
+  return "Start";
 });
 
 const antennaCalDisplay = computed(() => {
@@ -2602,7 +2614,7 @@ const antennaCalDisplay = computed(() => {
   let calibratedAgo = "—";
   if (cal?.calibrated_at) {
     const ago = Math.max(0, Math.round((Date.now() - cal.calibrated_at) / 60000));
-    calibratedAgo = ago < 1 ? "방금" : `${ago}분 전`;
+    calibratedAgo = ago < 1 ? "just now" : `${ago} min ago`;
   }
   return {
     a_x: fmt(cal?.a_x),
@@ -2611,7 +2623,7 @@ const antennaCalDisplay = computed(() => {
     calibratedAgo,
     errorReason: cal && !cal.ok ? cal.reason : null,
     source: cal?.source || null,
-    sourceLabel: cal?.source === "manual" ? "수동" : (cal?.source === "auto" ? "자동" : null),
+    sourceLabel: cal?.source === "manual" ? "Manual" : (cal?.source === "auto" ? "Auto" : null),
   };
 });
 
@@ -2621,18 +2633,18 @@ const wheelCalDisplay = computed(() => {
   const fmtTrim = (v) => (typeof v === "number"
     ? `${v >= 0 ? "+" : ""}${v.toFixed(1)} µs` : "—");
   // radius_m comes back null when the rover drove straight enough that
-  // the trim solver returned 0 (>100 m radius). Show "직선" then so the
+  // the trim solver returned 0 (>100 m radius). Show "Straight" then so the
   // operator sees at a glance that no correction was needed.
   let radiusLabel = "—";
   if (typeof cal?.radius_m === "number") {
     radiusLabel = `${cal.radius_m.toFixed(1)} m`;
   } else if (typeof cal?.trim_us === "number") {
-    radiusLabel = "직선";
+    radiusLabel = "Straight";
   }
   let calibratedAgo = "—";
   if (cal?.calibrated_at) {
     const ago = Math.max(0, Math.round((Date.now() - cal.calibrated_at) / 60000));
-    calibratedAgo = ago < 1 ? "방금" : `${ago}분 전`;
+    calibratedAgo = ago < 1 ? "just now" : `${ago} min ago`;
   }
   return {
     scale_l: fmtScale(cal?.scale_l),
@@ -2695,7 +2707,7 @@ async function submitAntennaCal() {
   if (!antennaCalCanStart.value) return;
   antennaCalSubmitting.value = true;
   try {
-    await request("/api/rover/calibrate-antenna", { method: "POST" });
+    await roverRequest("/api/rover/calibrate-antenna", { method: "POST" });
     // Leave the modal open so the operator sees the running status; the
     // result row updates from SSE independently.
   } catch (err) {
@@ -2726,7 +2738,7 @@ async function submitAntennaManual() {
   if (!antennaManualValid.value || !roverStatus.value.connected) return;
   antennaManualSubmitting.value = true;
   try {
-    await request("/api/rover/set-antenna-offset", {
+    await roverRequest("/api/rover/set-antenna-offset", {
       method: "POST",
       body: JSON.stringify({
         a_x: parseFloat(antennaManualX.value) / 1000,
@@ -2746,7 +2758,7 @@ async function submitWheelCal() {
   if (!wheelCalCanStart.value) return;
   wheelCalSubmitting.value = true;
   try {
-    await request("/api/rover/calibrate-wheels", { method: "POST" });
+    await roverRequest("/api/rover/calibrate-wheels", { method: "POST" });
   } catch (err) {
     notifyError(err.message);
   } finally {
@@ -2756,12 +2768,12 @@ async function submitWheelCal() {
 
 async function submitWheelCalReset() {
   if (!roverStatus.value.connected || wheelCalResetSubmitting.value) return;
-  if (!window.confirm("휠 보정을 초기화합니다 (scale_l/r=1.0, trim=0 µs). 계속하시겠습니까?")) {
+  if (!window.confirm("This resets the wheel calibration (scale_l/r=1.0, trim=0 µs). Continue?")) {
     return;
   }
   wheelCalResetSubmitting.value = true;
   try {
-    await request("/api/rover/reset-wheel-cal", { method: "POST" });
+    await roverRequest("/api/rover/reset-wheel-cal", { method: "POST" });
   } catch (err) {
     notifyError(err.message);
   } finally {
@@ -2786,12 +2798,12 @@ function openBatteryCal() {
 async function submitBatteryCal() {
   const measured_v = Number(batteryCalInput.value);
   if (!Number.isFinite(measured_v) || measured_v < 15 || measured_v > 32) {
-    notifyWarn("측정값은 15~32 V 범위 안의 숫자여야 합니다.");
+    notifyWarn("The measured value must be a number from 15 to 32 V.");
     return;
   }
   batteryCalSubmitting.value = true;
   try {
-    await request("/api/rover/calibrate-battery", {
+    await roverRequest("/api/rover/calibrate-battery", {
       method: "POST",
       body: JSON.stringify({ measured_v }),
     });
@@ -2820,7 +2832,7 @@ async function openLogs() {
 
 async function refreshLogs() {
   try {
-    const res = await request("/api/rover/logs");
+    const res = await roverRequest("/api/rover/logs");
     const data = await res.json();
     logEntries.value = data.entries || [];
     logUploadedAt.value = data.uploaded_at || 0;
@@ -2830,7 +2842,7 @@ async function refreshLogs() {
 async function requestLogs() {
   logFetching.value = true;
   try {
-    await request("/api/rover/logs/fetch", { method: "POST" });
+    await roverRequest("/api/rover/logs/fetch", { method: "POST" });
     // Wait briefly for rover to upload, then refresh.
     setTimeout(async () => {
       await refreshLogs();
@@ -2844,9 +2856,9 @@ async function requestLogs() {
 
 function formatLogTime(ms) {
   if (!ms) return "—";
-  // ko-KR locale already produces "YYYY. M. D. 오전/오후 H:MM:SS"
-  // — match the OS default rather than rebuilding it by hand.
-  return new Date(ms).toLocaleString("ko-KR");
+  // "YYYY. M. D. H:MM:SS AM/PM": ko-KR date, en-US 12-hour time.
+  const d = new Date(ms);
+  return `${d.toLocaleDateString("ko-KR")} ${d.toLocaleTimeString("en-US")}`;
 }
 
 function downloadLogs() {
@@ -2865,7 +2877,7 @@ function downloadLogs() {
 // Snapshot create/list/restore/delete + modal state live in a composable;
 // destructured so the template keeps referencing them by name.
 const { showSnapshots, snapshotList, snapshotReason, openSnapshots, createSnapshot, restoreSnapshot, deleteSnapshot } =
-  useCourseSnapshots({ activeCourseId, notifyError });
+  useCourseSnapshots({ request: courseRequest, activeCourseId, notifyError });
 
 // Shared time formatter (also used for the log-upload timestamp), so it stays here.
 function formatSnapshotTime(ms) {
@@ -2887,7 +2899,7 @@ async function performUndo() {
   const entry = undoStack.value.pop();
   if (!entry) return;
   try { await entry.undo(); }
-  catch (err) { notifyError(`실행취소 실패: ${err.message}`); }
+  catch (err) { notifyError(`Undo failed: ${err.message}`); }
 }
 
 /* ── Cone CRUD ────────────────────────────────────── */
@@ -2896,13 +2908,13 @@ async function addCone(lat, lng, side, alt) {
   try {
     // alt가 undefined면 JSON.stringify가 키를 빼므로 수동(지도 클릭) 콘은 고도 없이
     // 저장되고, 로버에서 받은 콘만 RTK 고도(m)를 함께 보존한다.
-    const res = await request(`/api/courses/${activeCourseId.value}/cones`, {
+    const res = await courseRequest(`/api/courses/${activeCourseId.value}/cones`, {
       method: "POST", body: JSON.stringify({ lat, lng, side, alt }),
     });
     const created = await res.json().catch(() => null);
     if (created && created.id != null) {
       const cid = created.id;
-      pushUndo("콘 추가", () => request(`/api/cones/${cid}`, { method: "DELETE" }));
+      pushUndo("Add cone", () => courseRequest(`/api/cones/${cid}`, { method: "DELETE" }));
     }
   } catch (err) { notifyError(err.message); }
 }
@@ -2923,10 +2935,10 @@ async function updateCone() {
     body.lng = lng;
   }
   try {
-    await request(`/api/cones/${id}`, {
+    await courseRequest(`/api/cones/${id}`, {
       method: "PATCH", body: JSON.stringify(body),
     });
-    if (before) pushUndo("콘 수정", () => request(`/api/cones/${id}`, {
+    if (before) pushUndo("Edit cone", () => courseRequest(`/api/cones/${id}`, {
       method: "PATCH", body: JSON.stringify({ lat: before.lat, lng: before.lng, side: before.side }),
     }));
     selectedConeId.value = null;
@@ -2937,9 +2949,9 @@ async function deleteCone(id) {
   const courseId = activeCourseId.value;
   const before = (conesMap.value[courseId] || []).find((c) => c.id === id);
   try {
-    await request(`/api/cones/${id}`, { method: "DELETE" });
+    await courseRequest(`/api/cones/${id}`, { method: "DELETE" });
     if (selectedConeId.value === id) selectedConeId.value = null;
-    if (before) pushUndo("콘 삭제", () => request(`/api/courses/${courseId}/cones`, {
+    if (before) pushUndo("Delete cone", () => courseRequest(`/api/courses/${courseId}/cones`, {
       method: "POST", body: JSON.stringify({ lat: before.lat, lng: before.lng, side: before.side, alt: before.alt }),
     }));
   } catch (err) { notifyError(err.message); }
@@ -2950,19 +2962,19 @@ async function deleteCone(id) {
 async function deleteSelected() {
   const ids = [...multiSelectedIds.value];
   if (ids.length === 0 || editLocked.value) return;
-  if (!confirm(`선택한 콘 ${ids.length}개를 삭제하시겠습니까?`)) return;
+  if (!confirm(`Delete ${ids.length} selected cones?`)) return;
   if (rotateMode.value) exitRotateMode();
   const courseId = activeCourseId.value;
   const removed = (conesMap.value[courseId] || [])
     .filter((c) => multiSelectedIds.value.has(c.id))
     .map((c) => ({ lat: c.lat, lng: c.lng, side: c.side }));
   try {
-    await Promise.all(ids.map((id) => request(`/api/cones/${id}`, { method: "DELETE" })));
-    if (removed.length) pushUndo(`콘 ${removed.length}개 삭제`, () => Promise.all(
-      removed.map((r) => request(`/api/courses/${courseId}/cones`, { method: "POST", body: JSON.stringify(r) }))
+    await Promise.all(ids.map((id) => courseRequest(`/api/cones/${id}`, { method: "DELETE" })));
+    if (removed.length) pushUndo(`Delete ${removed.length} cones`, () => Promise.all(
+      removed.map((r) => courseRequest(`/api/courses/${courseId}/cones`, { method: "POST", body: JSON.stringify(r) }))
     ));
   } catch (err) {
-    notifyError(`콘 삭제 실패: ${err.message}`);
+    notifyError(`Failed to delete cones: ${err.message}`);
   }
   if (ids.includes(selectedConeId.value)) selectedConeId.value = null;
   multiSelectedIds.value = new Set();
@@ -2976,17 +2988,17 @@ async function deleteAllCones() {
   if (!courseId) return;
   const all = (conesMap.value[courseId] || []).map((c) => ({ lat: c.lat, lng: c.lng, side: c.side, alt: c.alt }));
   if (all.length === 0) return;
-  if (!confirm(`이 코스의 콘 ${all.length}개를 모두 삭제하시겠습니까? 되돌리기 전까지 지도에서 사라집니다.`)) return;
+  if (!confirm(`Delete all ${all.length} cones in this course? They disappear from the map unless you undo.`)) return;
   if (rotateMode.value) exitRotateMode();
   try {
-    await request(`/api/courses/${courseId}/cones`, { method: "DELETE" });
+    await courseRequest(`/api/courses/${courseId}/cones`, { method: "DELETE" });
     selectedConeId.value = null;
     multiSelectedIds.value = new Set();
-    pushUndo(`콘 ${all.length}개 전체 삭제`, () => Promise.all(
-      all.map((c) => request(`/api/courses/${courseId}/cones`, { method: "POST", body: JSON.stringify(c) }))
+    pushUndo(`Delete all ${all.length} cones`, () => Promise.all(
+      all.map((c) => courseRequest(`/api/courses/${courseId}/cones`, { method: "POST", body: JSON.stringify(c) }))
     ));
   } catch (err) {
-    notifyError(`전체 삭제 실패: ${err.message}`);
+    notifyError(`Failed to delete all cones: ${err.message}`);
   }
 }
 
@@ -3012,7 +3024,7 @@ async function addMemo() {
   const center = map.getCenter();
   const mpp = metersPerPixel(center.lat);
   try {
-    const res = await request(`/api/courses/${courseId}/memos`, {
+    const res = await courseRequest(`/api/courses/${courseId}/memos`, {
       method: "POST",
       body: JSON.stringify({ lat: center.lat, lng: center.lng, width: 150 * mpp, height: 48 * mpp, content: "" }),
     });
@@ -3021,7 +3033,7 @@ async function addMemo() {
       // SSE 에코 전에 즉시 보이도록 낙관적 추가(에코가 같은 배열로 덮어써도 무해).
       const list = memosMap.value[courseId] || (memosMap.value[courseId] = []);
       if (!list.some((x) => x.id === created.id)) list.push(created);
-      pushUndo("메모 추가", () => request(`/api/memos/${created.id}`, { method: "DELETE" }));
+      pushUndo("Add memo", () => courseRequest(`/api/memos/${created.id}`, { method: "DELETE" }));
       nextTick(() => {
         document.querySelector(`.memo-label[data-id="${created.id}"] .memo-text`)?.focus();
       });
@@ -3032,8 +3044,8 @@ async function addMemo() {
 async function deleteMemo(id) {
   const before = findMemo(id);
   try {
-    await request(`/api/memos/${id}`, { method: "DELETE" });
-    if (before) pushUndo("메모 삭제", () => request(`/api/courses/${before.course_id}/memos`, {
+    await courseRequest(`/api/memos/${id}`, { method: "DELETE" });
+    if (before) pushUndo("Delete memo", () => courseRequest(`/api/courses/${before.course_id}/memos`, {
       method: "POST",
       body: JSON.stringify({ lat: before.lat, lng: before.lng, width: before.width, height: before.height, content: before.content }),
     }));
@@ -3048,8 +3060,8 @@ async function onMemoBlur(m) {
   memoEditOrig = null;
   if (before === null || m.content === before) return;
   try {
-    await request(`/api/memos/${m.id}`, { method: "PATCH", body: JSON.stringify({ content: m.content }) });
-    pushUndo("메모 수정", () => request(`/api/memos/${m.id}`, { method: "PATCH", body: JSON.stringify({ content: before }) }));
+    await courseRequest(`/api/memos/${m.id}`, { method: "PATCH", body: JSON.stringify({ content: m.content }) });
+    pushUndo("Edit memo", () => courseRequest(`/api/memos/${m.id}`, { method: "PATCH", body: JSON.stringify({ content: before }) }));
   } catch (err) { m.content = before; notifyError(err.message); }
 }
 
@@ -3089,8 +3101,8 @@ async function onMemoDragEnd() {
   const m = findMemo(d.id);
   if (!m || (m.lat === d.origLat && m.lng === d.origLng)) return;
   try {
-    await request(`/api/memos/${d.id}`, { method: "PATCH", body: JSON.stringify({ lat: m.lat, lng: m.lng }) });
-    pushUndo("메모 이동", () => request(`/api/memos/${d.id}`, { method: "PATCH", body: JSON.stringify({ lat: d.origLat, lng: d.origLng }) }));
+    await courseRequest(`/api/memos/${d.id}`, { method: "PATCH", body: JSON.stringify({ lat: m.lat, lng: m.lng }) });
+    pushUndo("Move memo", () => courseRequest(`/api/memos/${d.id}`, { method: "PATCH", body: JSON.stringify({ lat: d.origLat, lng: d.origLng }) }));
   } catch (err) { notifyError(err.message); }
 }
 
@@ -3123,8 +3135,8 @@ async function onMemoResizeEnd() {
   const m = findMemo(r.id);
   if (!m || (m.width === r.origW && m.height === r.origH)) return;
   try {
-    await request(`/api/memos/${r.id}`, { method: "PATCH", body: JSON.stringify({ width: m.width, height: m.height }) });
-    pushUndo("메모 크기 조절", () => request(`/api/memos/${r.id}`, { method: "PATCH", body: JSON.stringify({ width: r.origW, height: r.origH }) }));
+    await courseRequest(`/api/memos/${r.id}`, { method: "PATCH", body: JSON.stringify({ width: m.width, height: m.height }) });
+    pushUndo("Resize memo", () => courseRequest(`/api/memos/${r.id}`, { method: "PATCH", body: JSON.stringify({ width: r.origW, height: r.origH }) }));
   } catch (err) { notifyError(err.message); }
 }
 
@@ -3173,8 +3185,8 @@ async function onMemoRotateEnd() {
     mapFrame.value++;
     if (rr.orig === 0) return; // 이미 0이면 저장 불필요
     try {
-      await request(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: 0 }) });
-      pushUndo("메모 회전 초기화", () => request(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: rr.orig }) }));
+      await courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: 0 }) });
+      pushUndo("Reset memo rotation", () => courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: rr.orig }) }));
     } catch (err) { notifyError(err.message); }
     return;
   }
@@ -3184,8 +3196,8 @@ async function onMemoRotateEnd() {
   m.rotation = norm;
   if (norm === rr.orig) return;
   try {
-    await request(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: norm }) });
-    pushUndo("메모 회전", () => request(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: rr.orig }) }));
+    await courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: norm }) });
+    pushUndo("Rotate memo", () => courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: rr.orig }) }));
   } catch (err) { notifyError(err.message); }
 }
 
@@ -3210,7 +3222,7 @@ function normalizeDeg(d) {
 function enterRotateMode() {
   if (rotateMode.value) { exitRotateMode(); return; }
   if (editLocked.value) return;
-  if (multiSelectedIds.value.size < 2) { notifyWarn("회전하려면 콘을 2개 이상 선택하세요."); return; }
+  if (multiSelectedIds.value.size < 2) { notifyWarn("Select at least 2 cones to rotate."); return; }
   if (toolMode.value !== "none") exitToolMode(); // mutually exclusive with measurement tools
   selectMode.value = false;
   rotateMode.value = true;
@@ -3315,13 +3327,13 @@ async function onRotateDragEnd() {
   const undoPositions = startPositions ? [...startPositions].map(([id, p]) => ({ id, lat: p.lat, lng: p.lng })) : [];
   try {
     await Promise.all(updates.map((u) =>
-      request(`/api/cones/${u.id}`, { method: "PATCH", body: JSON.stringify({ lat: u.lat, lng: u.lng }) })
+      courseRequest(`/api/cones/${u.id}`, { method: "PATCH", body: JSON.stringify({ lat: u.lat, lng: u.lng }) })
     ));
-    if (undoPositions.length) pushUndo("콘 회전", () => Promise.all(
-      undoPositions.map((p) => request(`/api/cones/${p.id}`, { method: "PATCH", body: JSON.stringify({ lat: p.lat, lng: p.lng }) }))
+    if (undoPositions.length) pushUndo("Rotate cones", () => Promise.all(
+      undoPositions.map((p) => courseRequest(`/api/cones/${p.id}`, { method: "PATCH", body: JSON.stringify({ lat: p.lat, lng: p.lng }) }))
     ));
   } catch (err) {
-    notifyError(`콘 회전 저장 실패: ${err.message}`);
+    notifyError(`Failed to save cone rotation: ${err.message}`);
     for (const [id, p] of (startPositions || [])) {
       const m = markers[`${activeCourseId.value}-${id}`];
       if (m) m.setLatLng([p.lat, p.lng]);
@@ -3355,13 +3367,13 @@ async function rotateByDegrees(deg) {
   for (const u of updates) { const m = markers[`${activeCourseId.value}-${u.id}`]; if (m) m.setLatLng([u.lat, u.lng]); }
   try {
     await Promise.all(updates.map((u) =>
-      request(`/api/cones/${u.id}`, { method: "PATCH", body: JSON.stringify({ lat: u.lat, lng: u.lng }) })
+      courseRequest(`/api/cones/${u.id}`, { method: "PATCH", body: JSON.stringify({ lat: u.lat, lng: u.lng }) })
     ));
-    pushUndo("콘 회전", () => Promise.all(
-      startPositions.map((p) => request(`/api/cones/${p.id}`, { method: "PATCH", body: JSON.stringify({ lat: p.lat, lng: p.lng }) }))
+    pushUndo("Rotate cones", () => Promise.all(
+      startPositions.map((p) => courseRequest(`/api/cones/${p.id}`, { method: "PATCH", body: JSON.stringify({ lat: p.lat, lng: p.lng }) }))
     ));
   } catch (err) {
-    notifyError(`콘 회전 저장 실패: ${err.message}`);
+    notifyError(`Failed to save cone rotation: ${err.message}`);
     for (const p of startPositions) { const m = markers[`${activeCourseId.value}-${p.id}`]; if (m) m.setLatLng([p.lat, p.lng]); }
   }
   suppressRebuild = false;
@@ -3452,7 +3464,7 @@ function toggleFollowRover() {
   if (followRover.value) { followReceiver.value = false; centerOnRover(); }
 }
 
-// GPS-tab-only "track receiver" toggle — mirrors 로버 추적 but centers on the
+// GPS-tab-only "track receiver" toggle — mirrors "Follow rover" but centers on the
 // receiver's position, and only acts while the GPS tab is open. Mutually
 // exclusive with rover-follow so the map never chases two targets at once.
 const followReceiver = ref(loadPref("followReceiver", false, (v) => v === "true"));
@@ -3511,7 +3523,7 @@ function scheduleFollow(lat, lng) {
 // Live-marker colours/labels per position source. The GPS receiver (teal) is the
 // preferred cone-capture source; the rover (purple) is the fallback.
 const ROVER_MARKER_COLORS = { rover: "#a855f7", receiver: "#14b8a6" };
-const ROVER_MARKER_LABELS = { rover: "로버", receiver: "수신기" };
+const ROVER_MARKER_LABELS = { rover: "Rover", receiver: "GPS unit" };
 
 function roverSourceIcon(source) {
   const color = ROVER_MARKER_COLORS[source] || ROVER_MARKER_COLORS.rover;
@@ -3623,14 +3635,14 @@ async function addConeFromRover() {
   if (!activeCourseId.value) return;
   roverLoading.value = true;
   try {
-    const res = await request("/api/rover/request", { method: "POST" });
+    const res = await roverRequest("/api/rover/request", { method: "POST" });
     const { lat, lng, alt, source } = await res.json();
     // Use the source the server actually answered from (not the live, possibly
     // just-flipped position_source) so the cone lands on the right device marker.
     setDeviceMarker(source === "receiver" ? "receiver" : "rover", lat, lng);
     await addCone(lat, lng, currentSide.value, alt);
   } catch (err) {
-    notifyError(err.message || "로버 위치 수신에 실패했습니다.");
+    notifyError(err.message || "Failed to get the rover position.");
   } finally { roverLoading.value = false; }
 }
 
@@ -3786,7 +3798,7 @@ async function loadMissionPresets() {
   missionPresets.value = [];
   if (!courseId) return;
   try {
-    const response = await request(`/api/rover/mission-presets?course_id=${courseId}`);
+    const response = await courseRequest(`/api/courses/${courseId}/mission-presets`);
     const presets = (await response.json()).presets || [];
     if (presetResponseIsCurrent({
       requestId,
@@ -3800,7 +3812,7 @@ async function loadMissionPresets() {
       latestRequestId: missionPresetRequestSeq,
       requestedCourseId: courseId,
       activeCourseId: activeCourseId.value,
-    })) notifyError(`프리셋을 불러오지 못했습니다: ${error.message}`);
+    })) notifyError(`Failed to load presets: ${error.message}`);
   }
 }
 
@@ -3882,7 +3894,7 @@ async function submitMissionBuilder(payload, { run = false } = {}) {
       finishBehavior: payload.finishBehavior,
     });
     missionBuilderBase.value = missionDraftToken(edited);
-    notifySuccess("남은 미션 경로를 저장했습니다.");
+    notifySuccess("Saved the remaining mission route.");
     if (submission.next === "resume") {
       openPreflight(edited.status === "ready" ? "start-existing" : "resume", {
         routeAlreadySynced: submission.routeAlreadySynced,
@@ -3891,11 +3903,11 @@ async function submitMissionBuilder(payload, { run = false } = {}) {
     }
   } catch (error) {
     missionBuilderBase.value = null;
-    notifyError(`남은 경로 저장 실패: ${error.message}`);
+    notifyError(`Failed to save the remaining route: ${error.message}`);
     if (error.data?.reason === "cone_snapshot_mismatch") {
       await fetchAll();
       if (map && !isMissionsView.value) rebuildAllMarkers();
-      notifyWarn("변경된 콘 좌표를 다시 불러왔습니다. 최신 경로를 검토한 뒤 다시 적용하세요.");
+      notifyWarn("Reloaded the changed cone positions. Review the latest route and apply it again.");
     }
     // A 409 response intentionally contains no route body. Fetch the current
     // authority before allowing any further start/resume action.
@@ -3918,7 +3930,8 @@ async function saveMissionPreset({ name, items, finishBehavior }) {
   missionPresetBusy.value = true;
   try {
     const existing = missionPresets.value.find((preset) => preset.name.toLowerCase() === name.toLowerCase());
-    await request(existing ? `/api/rover/mission-presets/${existing.id}` : "/api/rover/mission-presets", {
+    const presetsPath = `/api/courses/${activeCourseId.value}/mission-presets`;
+    await courseRequest(existing ? `${presetsPath}/${existing.id}` : presetsPath, {
       method: existing ? "PUT" : "POST",
       body: JSON.stringify(buildMissionPresetPayload({
         courseId: activeCourseId.value,
@@ -3928,10 +3941,10 @@ async function saveMissionPreset({ name, items, finishBehavior }) {
         existing,
       })),
     });
-    notifySuccess(`미션 프리셋 '${name}'을 ${existing ? "갱신" : "저장"}했습니다.`);
+    notifySuccess(`${existing ? "Updated" : "Saved"} mission preset '${name}'.`);
     await loadMissionPresets();
   } catch (error) {
-    notifyError(`프리셋 저장 실패: ${error.message}`);
+    notifyError(`Failed to save preset: ${error.message}`);
     await loadMissionPresets();
   } finally {
     missionPresetBusy.value = false;
@@ -3940,22 +3953,22 @@ async function saveMissionPreset({ name, items, finishBehavior }) {
 
 async function deleteMissionPreset(id) {
   if (missionPresetBusy.value) return;
-  if (!window.confirm("이 미션 프리셋을 삭제할까요?")) return;
+  if (!window.confirm("Delete this mission preset?")) return;
   const preset = missionPresets.value.find((item) => item.id === id);
   if (!preset) {
-    notifyWarn("프리셋 목록이 변경되었습니다. 최신 목록을 다시 불러옵니다.");
+    notifyWarn("The preset list changed. Reloading the latest list.");
     await loadMissionPresets();
     return;
   }
   missionPresetBusy.value = true;
   try {
-    await request(`/api/rover/mission-presets/${id}`, {
+    await courseRequest(`/api/courses/${preset.course_id}/mission-presets/${id}`, {
       method: "DELETE",
       body: JSON.stringify(buildMissionPresetDeletePayload(preset)),
     });
     await loadMissionPresets();
   } catch (error) {
-    notifyError(`프리셋 삭제 실패: ${error.message}`);
+    notifyError(`Failed to delete preset: ${error.message}`);
     await loadMissionPresets();
   } finally {
     missionPresetBusy.value = false;
@@ -3965,7 +3978,7 @@ async function deleteMissionPreset(id) {
 function computePathFromRover() {
   const lp = roverStatus.value.last_position;
   if (!lp || lp.lat == null || lp.lng == null) {
-    notifyWarn("로버 위치를 알 수 없습니다.");
+    notifyWarn("The rover position is unknown.");
     return;
   }
   computePath(lp.lat, lp.lng);
@@ -4108,11 +4121,11 @@ function clearPath({ endMissionOnServer = true } = {}) {
   if (roverMode.value !== "manual") roverMode.value = "none";
 }
 
-// "미션 종료" 버튼 핸들러. 보존된(비상정지·중단) 미션을 폐기하는 파괴적 작업이라
+// "End mission" 버튼 핸들러. 보존된(비상정지·중단) 미션을 폐기하는 파괴적 작업이라
 // 반드시 확인을 받는다.
 async function abandonMission() {
   if (missionEndBusy.value || missionEndAwaitingAckId.value === activeMissionAuthority.value?.id) return;
-  if (!window.confirm("진행 중인 미션을 종료하고 폐기합니다.\n'이어서 실행'할 수 없게 됩니다. 계속하시겠습니까?")) return;
+  if (!window.confirm("This ends and discards the current mission.\nIt can no longer be resumed. Continue?")) return;
   const missionId = activeMissionAuthority.value?.id;
   if (!missionId) return;
   missionEndBusy.value = true;
@@ -4122,14 +4135,14 @@ async function abandonMission() {
   let authorityToken = null;
   try {
     authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-    const response = await request(`/api/missions/${missionId}/end`, { method: "POST" });
+    const response = await roverRequest(`/api/missions/${missionId}/end`, { method: "POST" });
     const data = await response.json();
     if (applyMissionCommandResponse(data, "end", authorityToken)) {
-      notifyWarn("미션 종료 요청을 등록했습니다. 로버의 정지 확인 전까지 경로와 제어 상태를 유지합니다.");
+      notifyWarn("Mission end requested. The route and controls stay as they are until the rover confirms the stop.");
     }
   } catch (err) {
     await reconcileMissionEndRequestFailure(missionId);
-    notifyWarn(`미션 종료 실패: ${err.message}`);
+    notifyWarn(`Failed to end mission: ${err.message}`);
   } finally {
     missionEndBusy.value = false;
   }
@@ -4168,14 +4181,14 @@ function cancelPreflight() {
 async function confirmPreflight() {
   if (!preflightCanConfirm.value) {
     notifyError(preflightHasBlockingFailure.value
-      ? "비상정지가 해제되기 전에는 미션을 시작하거나 재개할 수 없습니다."
-      : "점검 항목을 확인하거나 허용 가능한 경고를 명시적으로 승인하세요.");
+      ? "A mission cannot start or resume until the E-stop is released."
+      : "Resolve the failed checks or explicitly accept the remaining warnings.");
     return;
   }
   if (preflightMode.value !== "execute"
       && !missionAuthorityFenceIsCurrent(preflightAuthorityToken.value)) {
     cancelPreflight();
-    notifyError("점검 중 미션 상태가 변경되었습니다. 최신 상태로 다시 점검하세요.");
+    notifyError("The mission changed during the preflight check. Check again with the latest state.");
     return;
   }
   const force = preflightForce.value && !preflightAllOk.value;
@@ -4211,7 +4224,7 @@ async function syncMissionRemaining(mission, {
     finishBehavior,
     items: remaining,
   });
-  const response = await request(`/api/missions/${mission.id}/remaining`, {
+  const response = await roverRequest(`/api/missions/${mission.id}/remaining`, {
     method: "PUT",
     body: JSON.stringify(body),
   });
@@ -4222,10 +4235,10 @@ async function syncMissionRemaining(mission, {
 }
 
 const MISSION_COMMAND_LABELS = {
-  start: "미션 시작",
-  resume: "미션 재개",
-  pause: "미션 일시정지",
-  end: "미션 종료",
+  start: "mission start",
+  resume: "mission resume",
+  pause: "mission pause",
+  end: "mission end",
 };
 
 function applyMissionCommandResponse(data, action, authorityToken) {
@@ -4252,8 +4265,8 @@ function applyMissionCommandResponse(data, action, authorityToken) {
     }
   }
   if (decision.failed) {
-    notifyError(`${MISSION_COMMAND_LABELS[action] || "미션 명령"}이 로버에 전달되지 않았습니다. `
-      + "로버가 계속 움직일 수 있으므로 화면과 현장 상태를 확인하고 안전 정지를 준비하세요.");
+    notifyError(`The ${MISSION_COMMAND_LABELS[action] || "mission"} command did not reach the rover. `
+      + "The rover may keep moving. Check the screen and the field, and be ready to stop it safely.");
     if (!decision.mission) void fetchRoverStatus();
     return false;
   }
@@ -4312,7 +4325,7 @@ async function reconcileMissionEndRequestFailure(
       authorityMission: activeMissionAuthority.value,
     }),
     fetchActiveMission: async () => {
-      const response = await request("/api/missions/active", { method: "GET" });
+      const response = await roverRequest("/api/missions/active", { method: "GET" });
       const data = await response.json();
       return data.mission || null;
     },
@@ -4367,7 +4380,7 @@ async function startExistingPath(opts = {}) {
     if (!missionAuthorityFenceIsCurrent(commandAuthorityFence)) {
       throw missionAuthorityAdvancedError(authorityToken);
     }
-    const response = await request(`/api/missions/${edited.id}/start`, {
+    const response = await roverRequest(`/api/missions/${edited.id}/start`, {
       method: "POST",
       body: JSON.stringify(commandBody),
     });
@@ -4398,7 +4411,7 @@ async function executePath(opts = {}) {
   let authorityToken = null;
   try {
     authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-    const createResponse = await request("/api/missions", {
+    const createResponse = await roverRequest("/api/missions", {
       method: "POST",
       body: JSON.stringify(buildMissionCreatePayload({
         courseId: activeCourseId.value,
@@ -4418,11 +4431,11 @@ async function executePath(opts = {}) {
       currentRouteGeneration: localMissionRouteGeneration,
     })) {
       roverMode.value = "stopped";
-      notifyWarn("미션은 생성됐지만 검토한 코스 또는 경로가 변경되어 자동 시작하지 않았습니다. 최신 경로를 다시 확인하세요.");
+      notifyWarn("The mission was created but not started because the reviewed course or route changed. Check the latest route.");
       return;
     }
     authorityToken = beginMissionAuthorityRequest(mission);
-    const startResponse = await request(`/api/missions/${mission.id}/start`, {
+    const startResponse = await roverRequest(`/api/missions/${mission.id}/start`, {
       method: "POST",
       body: JSON.stringify(buildMissionCommandPayload({
         token: missionCommandToken(mission),
@@ -4456,7 +4469,7 @@ async function executePath(opts = {}) {
 async function resumePath(opts = {}) {
   const mission = activeMission.value;
   if (!mission) {
-    notifyError("이어갈 활성 미션이 없습니다.");
+    notifyError("No active mission to resume.");
     return;
   }
   let authorityToken = null;
@@ -4491,7 +4504,7 @@ async function resumePath(opts = {}) {
     if (!missionAuthorityFenceIsCurrent(commandAuthorityFence)) {
       throw missionAuthorityAdvancedError(authorityToken);
     }
-    const resumeResponse = await request(`/api/missions/${edited.id}/resume`, {
+    const resumeResponse = await roverRequest(`/api/missions/${edited.id}/resume`, {
       method: "POST",
       body: JSON.stringify(commandBody),
     });
@@ -4552,11 +4565,11 @@ async function pauseMission() {
   pauseBusy.value = true;
   try {
     const authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-    const response = await request(`/api/missions/${activeMission.value.id}/pause`, { method: "POST" });
+    const response = await roverRequest(`/api/missions/${activeMission.value.id}/pause`, { method: "POST" });
     const data = await response.json();
     applyMissionCommandResponse(data, "pause", authorityToken);
   } catch (err) {
-    notifyError(`일시정지 실패: ${err.message}`);
+    notifyError(`Failed to pause: ${err.message}`);
   } finally {
     pauseBusy.value = false;
   }
@@ -4570,7 +4583,7 @@ async function resumeMission() {
 function startManualControl() {
   if (manualAuthorityReleaseBusy.value) return;
   if (!roverStatus.value.connected) {
-    notifyWarn("로버가 연결되어 있지 않습니다.");
+    notifyWarn("The rover is not connected.");
     return;
   }
   // During a soft pause the operator drives manually to clear an obstacle, then
@@ -4602,7 +4615,7 @@ function stopManualControl() {
     // link this POST also fails, but then the MCU heartbeat fail-safe stops
     // the pump anyway.
     if (pumpOn.value) {
-      request("/api/rover/pump", {
+      roverRequest("/api/rover/pump", {
         method: "POST",
         body: JSON.stringify({ on: false }),
       }).catch(() => {});
@@ -4610,7 +4623,7 @@ function stopManualControl() {
     roverMode.value = "none";
     // Snap straight back to the server-truth mode — e.g. if the operator was
     // manually clearing an obstacle during a soft pause, this re-shows the
-    // 재개 button immediately instead of waiting for the next status tick.
+    // Resume button immediately instead of waiting for the next status tick.
     reconcileRoverMode(roverStatus.value);
   }
 }
@@ -4629,22 +4642,22 @@ async function releaseManualForMissionAuthority() {
   // then make zero the final manual command observed by the server.
   await waitForManualControlDrain(pendingManualControlRequests);
   try {
-    await request("/api/rover/control", {
+    await roverRequest("/api/rover/control", {
       method: "POST",
       body: JSON.stringify({ throttle: 0, steering: 0 }),
     });
   } catch (error) {
-    notifyError(`다른 운영자가 미션을 재개해 수동 제어 송신을 중단했지만 0 명령은 확인되지 않았습니다: ${error.message}. `
-      + "로버의 자율 주행 상태와 현장을 즉시 확인하세요.");
+    notifyError(`Another operator resumed the mission, so manual control stopped, but the zero command was not confirmed: ${error.message}. `
+      + "Check the rover's autonomous driving state and the field immediately.");
   }
   if (pumpOn.value) {
     try {
-      await request("/api/rover/pump", {
+      await roverRequest("/api/rover/pump", {
         method: "POST",
         body: JSON.stringify({ on: false }),
       });
     } catch (error) {
-      notifyError(`서버 미션 권한 전환 중 펌프 정지를 확인하지 못했습니다: ${error.message}`);
+      notifyError(`Could not confirm the pump stopped during the server mission handover: ${error.message}`);
     }
   }
   manualThrottle.value = 0;
@@ -4656,7 +4669,7 @@ async function releaseManualForMissionAuthority() {
 
 async function sendControl() {
   try {
-    await trackManualControlRequest(pendingManualControlRequests, request("/api/rover/control", {
+    await trackManualControlRequest(pendingManualControlRequests, roverRequest("/api/rover/control", {
       method: "POST",
       body: JSON.stringify({ throttle: manualThrottle.value, steering: manualSteering.value }),
     }));
@@ -4666,7 +4679,7 @@ async function sendControl() {
     // 5 consecutive failures (~250ms) → auto-release manual control
     if (manualFailCount >= 5 && roverMode.value === "manual") {
       stopManualControl();
-      notifyWarn("로버 연결이 끊어져 수동 제어를 해제했습니다.");
+      notifyWarn("Rover connection lost; manual control released.");
     }
   }
 }
@@ -4684,7 +4697,7 @@ async function toggleFullscreen() {
     if (document.fullscreenElement) await document.exitFullscreen();
     else await document.documentElement.requestFullscreen();
   } catch (e) {
-    notifyWarn(`전체화면 전환 실패: ${e?.message || e}`);
+    notifyWarn(`Failed to toggle fullscreen: ${e?.message || e}`);
   }
 }
 
@@ -4693,12 +4706,12 @@ async function togglePump() {
   pumpBusy.value = true;
   const next = !pumpOn.value;
   try {
-    await request("/api/rover/pump", {
+    await roverRequest("/api/rover/pump", {
       method: "POST",
       body: JSON.stringify({ on: next }),
     });
   } catch (e) {
-    notifyWarn(`펌프 제어 실패: ${e?.message || e}`);
+    notifyWarn(`Pump control failed: ${e?.message || e}`);
   } finally {
     pumpBusy.value = false;
   }
@@ -4762,10 +4775,6 @@ function updateJoystick(e) {
 }
 
 /* ── SSE ──────────────────────────────────────────── */
-// Tracks whether the SSE link recently dropped. Browser auto-reconnects, but
-// any rover:status events emitted during the gap are lost — fetch a snapshot
-// once the link is back so the reconciler can absorb missed transitions.
-let sseHadError = false;
 
 // 손상된 SSE 프레임 하나가 해당 리스너를 통째로 죽이고 이벤트를 조용히 삼키지
 // 않도록, 파싱 실패는 null로 처리하고 리스너가 조기 반환한다 (traffic useSSE 관행).
@@ -4774,29 +4783,36 @@ function parseSSE(e) {
 }
 
 function connectSSE() {
-  const base = import.meta.env.PROD ? "/course" : "";
-  eventSource = new EventSource(`${base}/api/events`);
+  // Course edits stream from the host; rover and GPS events from each device.
+  const courseEvents = host.course.events();
+  const roverEvents = host.devices.transport("rover")?.events() ?? null;
+  const gpsEvents = host.devices.transport("gps")?.events() ?? null;
+  eventStreams = [courseEvents, roverEvents, gpsEvents].filter(Boolean);
 
-  eventSource.addEventListener("error", () => {
-    sseHadError = true;
-    sseReconnecting.value = true;
-  });
-  eventSource.addEventListener("open", () => {
-    if (sseHadError) {
-      sseHadError = false;
-      sseReconnecting.value = false;
-      fetchRoverStatus();
-      // 단절 중 놓친 코스/콘/메모 편집을 다시 동기화한다(SSE는 끊긴 동안의 이벤트를 유실).
-      fetchAll().then(() => { if (map && !isMissionsView.value) rebuildAllMarkers(); });
-    }
-  });
+  // Events emitted while a link is down are lost; resynchronize once it is back.
+  const droppedLinks = new Set();
+  function watchLink(stream, name, resync) {
+    stream.addEventListener("error", () => {
+      droppedLinks.add(name);
+      sseReconnecting.value = true;
+    });
+    stream.addEventListener("open", () => {
+      if (!droppedLinks.delete(name)) return;
+      if (droppedLinks.size === 0) sseReconnecting.value = false;
+      resync();
+    });
+  }
+  watchLink(courseEvents, "course", () =>
+    fetchAll().then(() => { if (map && !isMissionsView.value) rebuildAllMarkers(); }));
+  if (roverEvents) watchLink(roverEvents, "rover", () => fetchRoverStatus());
+  if (gpsEvents) watchLink(gpsEvents, "gps", () => {});
 
-  eventSource.addEventListener("init", (e) => {
+  courseEvents.addEventListener("init", (e) => {
     const data = parseSSE(e);
     if (data) courses.value = data.courses;
   });
 
-  eventSource.addEventListener("courses", (e) => {
+  courseEvents.addEventListener("courses", (e) => {
     const data = parseSSE(e);
     if (!data) return;
     courses.value = data.courses;
@@ -4813,7 +4829,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener("cones", (e) => {
+  courseEvents.addEventListener("cones", (e) => {
     const data = parseSSE(e);
     if (!data) return;
     conesMap.value[data.courseId] = data.cones;
@@ -4826,7 +4842,7 @@ function connectSSE() {
     if (map && !suppressRebuild && !isMissionsView.value) rebuildAllMarkers(data.courseId);
   });
 
-  eventSource.addEventListener("memos", (e) => {
+  courseEvents.addEventListener("memos", (e) => {
     const data = parseSSE(e);
     if (!data) return;
     // 내가 드래그/리사이즈/입력 중인 코스면 에코로 편집 중 배열이 교체돼 조작이
@@ -4835,13 +4851,13 @@ function connectSSE() {
     memosMap.value[data.courseId] = data.memos;
   });
 
-  eventSource.addEventListener("route", (e) => {
+  courseEvents.addEventListener("route", (e) => {
     const data = parseSSE(e);
     if (!data) return;
     routeMap.value[data.courseId] = { markers: data.markers || [], steps: data.steps || [] };
   });
 
-  eventSource.addEventListener("rover", (e) => {
+  roverEvents?.addEventListener("rover", (e) => {
     const data = parseSSE(e);
     if (!data || !isValidRoverPos(data.lat, data.lng)) return;
     // Move only this device's own marker (leaving the other device's in place).
@@ -4854,7 +4870,7 @@ function connectSSE() {
     if (roverMode.value === "executing" && data.source !== "receiver") updatePathProgress(data.lat, data.lng);
   });
 
-  eventSource.addEventListener("rover:status", (e) => {
+  roverEvents?.addEventListener("rover:status", (e) => {
     const data = parseSSE(e);
     if (!data) return;
     const missionStatus = splitMissionStatusPayload(data);
@@ -4881,7 +4897,7 @@ function connectSSE() {
     reconcileRoverMode(roverStatus.value);
   });
 
-  eventSource.addEventListener("rover:mission", (e) => {
+  roverEvents?.addEventListener("rover:mission", (e) => {
     const data = parseSSE(e);
     const mission = data?.mission;
     if (!mission) {
@@ -4895,7 +4911,7 @@ function connectSSE() {
         missionEndAwaitingCommandId.value = null;
         cancelMissionEndReconcile();
       }
-      notifySuccess("미션을 완료했습니다.");
+      notifySuccess("Mission completed.");
       applyAuthoritativeMissionAbsence();
       return;
     }
@@ -4913,7 +4929,7 @@ function connectSSE() {
     reconcileRoverMode(roverStatus.value);
   });
 
-  eventSource.addEventListener("rover:waypoint", (e) => {
+  roverEvents?.addEventListener("rover:waypoint", (e) => {
     const data = parseSSE(e);
     if (!shouldConsumeLegacyMissionIndexEvent({
       activeMission: activeMission.value,
@@ -4924,7 +4940,7 @@ function connectSSE() {
     }
   });
 
-  eventSource.addEventListener("rover:skipped", (e) => {
+  roverEvents?.addEventListener("rover:skipped", (e) => {
     const data = parseSSE(e);
     if (!shouldConsumeLegacyMissionIndexEvent({
       activeMission: activeMission.value,
@@ -4937,11 +4953,11 @@ function connectSSE() {
       // skipped index until the *next* waypoint reports reached — at
       // which point it jumps by 2 and the skip becomes invisible.
       onWaypointReached(data.index);
-      notifyWarn(`웨이포인트 #${data.index + 1} 건너뜀 (stuck)`);
+      notifyWarn(`Skipped waypoint #${data.index + 1} (stuck)`);
     }
   });
 
-  eventSource.addEventListener("rover:spray", (e) => {
+  roverEvents?.addEventListener("rover:spray", (e) => {
     const data = parseSSE(e);
     if (!shouldConsumeLegacyMissionIndexEvent({
       activeMission: activeMission.value,
@@ -4952,20 +4968,20 @@ function connectSSE() {
   });
 
   // Base-station survey outcome — surface success/failure to the operator (a
-  // failed survey otherwise just silently reverts to "미측량").
-  eventSource.addEventListener("gps:survey_result", (e) => {
+  // failed survey otherwise just silently reverts to "Not surveyed").
+  gpsEvents?.addEventListener("gps:survey_result", (e) => {
     const data = parseSSE(e);
     if (!data) return;
     // Survey is an admin-only workflow; don't toast its outcome to other operators.
     if (!canOperateRover.value) return;
     if (data.ok) {
-      notifySuccess(`측량 완료: ${data.name}${data.samples != null ? ` (${data.samples} 샘플)` : ""}`);
+      notifySuccess(`Survey complete: ${data.name}${data.samples != null ? ` (${data.samples} samples)` : ""}`);
     } else {
       const reason = {
-        insufficient_samples: "RTK 고정 샘플이 부족합니다.",
-        unstable: "위치가 안정되지 않았습니다. 수신기 설치를 확인하세요.",
-      }[data.error] || "RTK 고정 샘플을 확보하지 못했습니다.";
-      notifyError(`측량 실패: ${data.name || "측량점"} — ${reason}`);
+        insufficient_samples: "Not enough RTK fixed samples.",
+        unstable: "The position did not stabilize. Check the GPS unit setup.",
+      }[data.error] || "Could not collect RTK fixed samples.";
+      notifyError(`Survey failed: ${data.name || "survey point"} — ${reason}`);
     }
   });
 }
@@ -5055,7 +5071,7 @@ async function fetchActiveMissionSnapshot(expectedSummary) {
   const requestId = ++activeMissionSnapshotRequestSeq;
   activeMissionSnapshotRequestKey = expectedKey;
   try {
-    const response = await request("/api/missions/active", { method: "GET" });
+    const response = await roverRequest("/api/missions/active", { method: "GET" });
     const data = await response.json();
     if (requestId !== activeMissionSnapshotRequestSeq
         || missionAuthorityKey(activeMissionAuthority.value) !== expectedKey) return;
@@ -5111,7 +5127,7 @@ async function fetchRoverStatus() {
     mission: activeMissionAuthority.value,
   });
   try {
-    const res = await request("/api/rover/status", { method: "GET" });
+    const res = await roverRequest("/api/rover/status", { method: "GET" });
     const data = await res.json();
     const missionStatus = splitMissionStatusPayload(data);
     roverStatus.value = { ...roverStatus.value, ...missionStatus.status };
@@ -5152,9 +5168,9 @@ function restoreActiveMission(mission, { expectedLocalMission = false } = {}) {
       && (!builderMissionEditable || !missionDraftMatches(missionBuilderBase.value, mission))) {
     showMissionBuilder.value = false;
     missionBuilderBase.value = null;
-    notifyWarn("서버의 미션 경로가 변경되어 열려 있던 초안을 닫았습니다. 최신 경로를 확인하세요.");
+    notifyWarn("The server mission route changed, so the open draft was closed. Check the latest route.");
   } else if (decision.discardsLocalDraft && !expectedLocalMission && !localMissionCreatePending) {
-    notifyWarn("다른 운영자가 활성화한 서버 미션으로 로컬 경로 초안을 교체했습니다.");
+    notifyWarn("Replaced the local route draft with the server mission another operator activated.");
   }
 
   displayedMissionId = mission.id;
@@ -5294,6 +5310,7 @@ onMounted(async () => {
   document.addEventListener("keydown", onGlobalKeyForChips);
   // 1Hz tick so time-ago chips and disconnect-ago refresh without new SSE events.
   uiTickInterval = setInterval(() => { uiTick.value = (uiTick.value + 1) % 3600; }, 1000);
+  await host.devices.refresh().catch((error) => notifyError(`Could not load devices: ${error.message}`));
   await fetchAll();
   await nextTick();
   await initMap();
@@ -5339,7 +5356,7 @@ onUnmounted(() => {
   if (pumpDurationTimer) clearTimeout(pumpDurationTimer);
   if (centerlineTimer) clearTimeout(centerlineTimer);
   if (followTimer != null) clearTimeout(followTimer);
-  if (eventSource) eventSource.close();
+  for (const stream of eventStreams) stream.close();
   if (map) {
     teardownRotateHandle();
     map.getContainer().removeEventListener("pointerdown", onSelectionStart);
@@ -5373,20 +5390,20 @@ onUnmounted(() => {
       <!-- Rover log viewer modal -->
       <div v-if="showLogs" class="preflight-backdrop" @click.self="showLogs = false">
         <div class="preflight-modal logs-modal">
-          <h3>로버 로그</h3>
+          <h3>Rover logs</h3>
           <div class="logs-toolbar">
             <button class="btn btn-primary btn-sm" :disabled="logFetching" @click="requestLogs">
-              {{ logFetching ? '가져오는 중...' : '로버에서 가져오기' }}
+              {{ logFetching ? 'Fetching...' : 'Fetch from rover' }}
             </button>
-            <button class="btn btn-ghost btn-sm" @click="refreshLogs">↻ 새로고침</button>
-            <button class="btn btn-ghost btn-sm" :disabled="logEntries.length === 0" @click="downloadLogs">↓ 다운로드</button>
+            <button class="btn btn-ghost btn-sm" @click="refreshLogs">↻ Refresh</button>
+            <button class="btn btn-ghost btn-sm" :disabled="logEntries.length === 0" @click="downloadLogs">↓ Download</button>
             <span class="logs-meta">
-              {{ logEntries.length }}줄
+              {{ logEntries.length }} lines
               <template v-if="logUploadedAt">· {{ formatSnapshotTime(logUploadedAt) }}</template>
             </span>
           </div>
           <div class="logs-view">
-            <div v-if="logEntries.length === 0" class="empty-msg">업로드된 로그가 없습니다. "로버에서 가져오기"를 눌러주세요.</div>
+            <div v-if="logEntries.length === 0" class="empty-msg">No uploaded logs. Press "Fetch from rover".</div>
             <div
               v-for="(e, i) in logsNewestFirst" :key="i"
               :class="['log-row', `log-${(e.level || '').toLowerCase()}`]"
@@ -5398,7 +5415,7 @@ onUnmounted(() => {
             </div>
           </div>
           <div class="preflight-actions">
-            <button class="btn btn-ghost btn-sm" @click="showLogs = false">닫기</button>
+            <button class="btn btn-ghost btn-sm" @click="showLogs = false">Close</button>
           </div>
         </div>
       </div>
@@ -5407,32 +5424,32 @@ onUnmounted(() => {
       <div v-if="showCalibration" class="preflight-backdrop" @click.self="closeCalibration">
         <div class="preflight-modal calibration-modal">
           <div class="modal-titlebar">
-            <h3>보정</h3>
+            <h3>Calibration</h3>
             <button
               class="modal-close-x"
               :disabled="antennaCalSubmitting || wheelCalSubmitting"
-              aria-label="닫기"
+              aria-label="Close"
               @click="closeCalibration"
             >×</button>
           </div>
 
           <div class="cal-tabs">
             <button class="cal-tab" :class="{ active: calTab === 'antenna' }" @click="calTab = 'antenna'">
-              안테나<span v-if="antennaCalRunning" class="cal-tab-dot" title="진행 중"></span>
+              Antenna<span v-if="antennaCalRunning" class="cal-tab-dot" title="Running"></span>
             </button>
             <button class="cal-tab" :class="{ active: calTab === 'wheel' }" @click="calTab = 'wheel'">
-              휠<span v-if="wheelCalRunning" class="cal-tab-dot" title="진행 중"></span>
+              Wheels<span v-if="wheelCalRunning" class="cal-tab-dot" title="Running"></span>
             </button>
           </div>
 
           <section class="cal-section" v-show="calTab === 'antenna'">
             <div class="cal-section-title">
-              안테나 오프셋
+              Antenna offset
               <span v-if="antennaCalDisplay.sourceLabel" class="cal-source-tag">
                 {{ antennaCalDisplay.sourceLabel }}
               </span>
             </div>
-            <div class="cal-when">재실행 조건: GPS 안테나를 옮기거나 다시 장착했을 때</div>
+            <div class="cal-when">Rerun when: the GPS antenna is moved or remounted</div>
             <div class="cal-current">
               <span class="cal-key">a_x</span>
               <span class="cal-val">{{ antennaCalDisplay.a_x }}</span>
@@ -5440,15 +5457,15 @@ onUnmounted(() => {
               <span class="cal-val">{{ antennaCalDisplay.a_y }}</span>
               <span class="cal-key">RMS</span>
               <span class="cal-val">{{ antennaCalDisplay.rms }}</span>
-              <span class="cal-key">갱신</span>
+              <span class="cal-key">Updated</span>
               <span class="cal-val">{{ antennaCalDisplay.calibratedAgo }}</span>
             </div>
             <div v-if="antennaCalDisplay.errorReason" class="cal-error">
-              마지막 시도 실패: {{ antennaCalDisplay.errorReason }}
+              Last attempt failed: {{ antennaCalDisplay.errorReason }}
             </div>
 
             <div class="cal-subsection">
-              <div class="cal-subsection-title">수동 입력</div>
+              <div class="cal-subsection-title">Manual entry</div>
               <div class="cal-manual-row">
                 <label class="cal-manual-field">
                   <span>a_x (mm)</span>
@@ -5468,60 +5485,60 @@ onUnmounted(() => {
                   class="btn btn-primary btn-sm"
                   :disabled="!antennaManualValid || antennaManualSubmitting || !roverStatus.connected"
                   @click="submitAntennaManual"
-                >{{ antennaManualSubmitting ? '저장 중...' : '저장' }}</button>
+                >{{ antennaManualSubmitting ? 'Saving...' : 'Save' }}</button>
               </div>
             </div>
 
             <div class="cal-subsection">
-              <div class="cal-subsection-title">자동 보정</div>
+              <div class="cal-subsection-title">Auto calibration</div>
               <div class="cal-space-req-row">
-                <span class="cal-space-req">필요 공간: 전후좌우 5 m</span>
+                <span class="cal-space-req">Space needed: 5 m on every side</span>
                 <button
                   class="btn btn-primary btn-sm"
                   :disabled="antennaCalSubmitting || antennaCalRunning || !antennaCalCanStart"
                   @click="submitAntennaCal"
-                >{{ antennaCalSubmitting ? '전송 중...' : (antennaCalRunning ? '진행 중' : antennaCalBtnLabel) }}</button>
+                >{{ antennaCalSubmitting ? 'Sending...' : (antennaCalRunning ? 'Running' : antennaCalBtnLabel) }}</button>
               </div>
-              <div v-if="antennaCalRunning" class="modal-status">진행 중...</div>
+              <div v-if="antennaCalRunning" class="modal-status">Running...</div>
             </div>
           </section>
 
           <section class="cal-section" v-show="calTab === 'wheel'">
-            <div class="cal-section-title">휠 인코더 스케일</div>
-            <div class="cal-when">재실행 조건: 타이어·휠 교체 후 · 주행거리/직진성이 GPS와 어긋날 때</div>
-            <div class="cal-space-req">필요 공간: 전방 12 m</div>
+            <div class="cal-section-title">Wheel encoder scale</div>
+            <div class="cal-when">Rerun when: tires or wheels are replaced · odometry or straight tracking disagrees with GPS</div>
+            <div class="cal-space-req">Space needed: 12 m ahead</div>
             <div class="cal-current">
               <span class="cal-key">scale_l</span>
               <span class="cal-val">{{ wheelCalDisplay.scale_l }}</span>
               <span class="cal-key">scale_r</span>
               <span class="cal-val">{{ wheelCalDisplay.scale_r }}</span>
-              <span class="cal-key">샘플</span>
+              <span class="cal-key">Samples</span>
               <span class="cal-val">{{ wheelCalDisplay.samples }}</span>
-              <span class="cal-key">조향 트림</span>
+              <span class="cal-key">Steering trim</span>
               <span class="cal-val">{{ wheelCalDisplay.trim }}</span>
-              <span class="cal-key">arc 반경</span>
+              <span class="cal-key">Arc radius</span>
               <span class="cal-val">{{ wheelCalDisplay.radius }}</span>
-              <span class="cal-key">갱신</span>
+              <span class="cal-key">Updated</span>
               <span class="cal-val">{{ wheelCalDisplay.calibratedAgo }}</span>
             </div>
             <div v-if="wheelCalDisplay.errorReason" class="cal-error">
-              마지막 시도 실패: {{ wheelCalDisplay.errorReason }}
+              Last attempt failed: {{ wheelCalDisplay.errorReason }}
             </div>
             <div v-if="wheelCalDisplay.steeringWarning" class="cal-error cal-warn">
-              조향 트림 미적용: {{ wheelCalDisplay.steeringWarning }} (휠 스케일은 적용됨)
+              Steering trim not applied: {{ wheelCalDisplay.steeringWarning }} (wheel scale applied)
             </div>
-            <div v-if="wheelCalRunning" class="modal-status">진행 중...</div>
+            <div v-if="wheelCalRunning" class="modal-status">Running...</div>
             <div class="cal-section-actions">
               <button
                 class="btn btn-ghost btn-sm"
                 :disabled="wheelCalResetSubmitting || wheelCalRunning || !roverStatus.connected"
                 @click="submitWheelCalReset"
-              >{{ wheelCalResetSubmitting ? '초기화 중...' : '초기화' }}</button>
+              >{{ wheelCalResetSubmitting ? 'Resetting...' : 'Reset' }}</button>
               <button
                 class="btn btn-primary btn-sm"
                 :disabled="wheelCalSubmitting || wheelCalRunning || !wheelCalCanStart"
                 @click="submitWheelCal"
-              >{{ wheelCalSubmitting ? '전송 중...' : (wheelCalRunning ? '진행 중' : (wheelCalCanStart ? '시작' : wheelCalBtnLabel)) }}</button>
+              >{{ wheelCalSubmitting ? 'Sending...' : (wheelCalRunning ? 'Running' : (wheelCalCanStart ? 'Start' : wheelCalBtnLabel)) }}</button>
             </div>
           </section>
         </div>
@@ -5530,19 +5547,19 @@ onUnmounted(() => {
       <!-- Battery calibration modal -->
       <div v-if="showBatteryCal" class="preflight-backdrop" @click.self="showBatteryCal = false">
         <div class="preflight-modal">
-          <h3>배터리 전압 보정</h3>
+          <h3>Battery voltage calibration</h3>
           <div class="cal-current">
-            <span class="cal-key">표시 전압</span>
+            <span class="cal-key">Displayed voltage</span>
             <span class="cal-val">{{ roverStatus.battery?.voltage != null ? roverStatus.battery.voltage.toFixed(2) + ' V' : '—' }}</span>
             <template v-if="roverStatus.battery?.voltage_raw != null">
-              <span class="cal-key">ADC 측정 전압</span>
+              <span class="cal-key">ADC voltage</span>
               <span class="cal-val">{{ roverStatus.battery.voltage_raw.toFixed(2) }} V</span>
             </template>
             <span class="cal-key">GAIN</span>
             <span class="cal-val">{{ roverStatus.battery?.gain != null ? roverStatus.battery.gain.toFixed(4) : '—' }}</span>
           </div>
           <div class="cal-input-row">
-            <label for="battery-cal-input">실측 전압 (V)</label>
+            <label for="battery-cal-input">Measured voltage (V)</label>
             <input
               id="battery-cal-input"
               v-model="batteryCalInput"
@@ -5555,9 +5572,9 @@ onUnmounted(() => {
             />
           </div>
           <div class="preflight-actions">
-            <button class="btn btn-ghost btn-sm" :disabled="batteryCalSubmitting" @click="showBatteryCal = false">취소</button>
+            <button class="btn btn-ghost btn-sm" :disabled="batteryCalSubmitting" @click="showBatteryCal = false">Cancel</button>
             <button class="btn btn-primary btn-sm" :disabled="batteryCalSubmitting || !batteryCalInput" @click="submitBatteryCal">
-              {{ batteryCalSubmitting ? '저장 중...' : '저장' }}
+              {{ batteryCalSubmitting ? 'Saving...' : 'Save' }}
             </button>
           </div>
         </div>
@@ -5566,28 +5583,28 @@ onUnmounted(() => {
       <!-- Snapshots modal -->
       <div v-if="showSnapshots" class="preflight-backdrop" @click.self="showSnapshots = false">
         <div class="preflight-modal snapshots-modal">
-          <h3>{{ activeCourse?.name }} 스냅샷</h3>
+          <h3>{{ activeCourse?.name }} snapshots</h3>
           <div class="snapshot-create">
-            <input v-model="snapshotReason" placeholder="메모 (선택)" maxlength="200" />
-            <button class="btn btn-primary btn-sm" @click="createSnapshot">저장</button>
+            <input v-model="snapshotReason" placeholder="Memo (optional)" maxlength="200" />
+            <button class="btn btn-primary btn-sm" @click="createSnapshot">Save</button>
           </div>
           <div class="snapshot-list">
-            <div v-if="snapshotList.length === 0" class="empty-msg">스냅샷이 없습니다.</div>
+            <div v-if="snapshotList.length === 0" class="empty-msg">No snapshots.</div>
             <div v-for="s in snapshotList" :key="s.id" class="snapshot-item">
               <div class="snapshot-top">
                 <span class="snapshot-time">{{ formatSnapshotTime(s.taken_at) }}</span>
-                <span class="snapshot-count">{{ s.cone_count }}개</span>
+                <span class="snapshot-count">{{ s.cone_count }} cones</span>
               </div>
               <div v-if="s.reason" class="snapshot-reason">{{ s.reason }}</div>
               <div v-if="s.actor" class="snapshot-actor">{{ s.actor }}</div>
               <div class="snapshot-actions">
-                <button class="btn btn-ghost btn-sm" @click="restoreSnapshot(s.id)">되돌리기</button>
-                <button class="btn btn-ghost btn-sm snapshot-delete" @click="deleteSnapshot(s.id)">삭제</button>
+                <button class="btn btn-ghost btn-sm" @click="restoreSnapshot(s.id)">Restore</button>
+                <button class="btn btn-ghost btn-sm snapshot-delete" @click="deleteSnapshot(s.id)">Delete</button>
               </div>
             </div>
           </div>
           <div class="preflight-actions">
-            <button class="btn btn-ghost btn-sm" @click="showSnapshots = false">닫기</button>
+            <button class="btn btn-ghost btn-sm" @click="showSnapshots = false">Close</button>
           </div>
         </div>
       </div>
@@ -5595,15 +5612,15 @@ onUnmounted(() => {
       <!-- Pre-flight checklist modal -->
       <div v-if="showPreflight" class="preflight-backdrop" @click.self="cancelPreflight">
         <div class="preflight-modal">
-          <h3>{{ preflightMode === 'resume' ? '재개 전 점검' : '경로 실행 전 점검' }}</h3>
+          <h3>{{ preflightMode === 'resume' ? 'Pre-resume check' : 'Preflight check' }}</h3>
           <div v-if="preflightMode === 'resume'" class="resume-selector">
-            완료된 {{ executedIndex }}개 항목은 자동으로 제외하고, 서버에 저장된 남은 경로만 이어갑니다.
+            Skips the {{ executedIndex }} completed items and continues only the remaining route stored on the server.
           </div>
           <div v-if="preflightEmptyRouteMode === 'return_only'" class="resume-selector">
-            콘 방문 없이 현재 위치에서 최초 미션 시작점으로 복귀합니다.
+            Returns from the current position to the mission start point without visiting cones.
           </div>
           <div v-else-if="preflightEmptyRouteMode === 'resolve_uncertain'" class="resume-selector">
-            불확실한 마지막 분사 결과를 운영자 판단으로 해소하고 추가 이동 없이 미션을 완료합니다.
+            Resolves the uncertain last dispense result by operator judgment and completes the mission without further movement.
           </div>
           <ul class="preflight-list">
             <li
@@ -5617,15 +5634,15 @@ onUnmounted(() => {
           </ul>
           <label v-if="!preflightAllOk && !preflightHasBlockingFailure" class="preflight-override">
             <input type="checkbox" v-model="preflightForce" />
-            경고를 이해했고, 강제 실행합니다
+            I understand the warnings and want to force the run
           </label>
           <div class="preflight-actions">
-            <button class="btn btn-ghost btn-sm" @click="cancelPreflight">취소</button>
+            <button class="btn btn-ghost btn-sm" @click="cancelPreflight">Cancel</button>
             <button
               class="btn btn-primary btn-sm"
               :disabled="!preflightCanConfirm"
               @click="confirmPreflight"
-            >{{ preflightMode === 'resume' ? '이어서 실행' : '실행' }}</button>
+            >{{ preflightMode === 'resume' ? 'Resume mission' : 'Run' }}</button>
           </div>
         </div>
       </div>
@@ -5685,13 +5702,13 @@ onUnmounted(() => {
                 <span class="mission-emoji">🚩</span>
                 <div class="mission-bar"><div class="mission-fill" :style="{ width: missionChip.percent + '%' }"></div></div>
                 <span class="mission-counts">
-                  {{ missionChip.returnOnly ? `시작점 복귀 · ${missionChip.percent}%` : `${missionChip.current}/${missionChip.total} · ${missionChip.percent}%` }}
+                  {{ missionChip.returnOnly ? `Return to start · ${missionChip.percent}%` : `${missionChip.current}/${missionChip.total} · ${missionChip.percent}%` }}
                 </span>
                 <span v-if="missionChip.eta" class="mission-eta">ETA {{ missionChip.eta }}</span>
               </div>
               <span class="chip-popover" :style="popoverStyle">
                 <span class="popover-row"><span class="popover-key">PROGRESS</span><span class="popover-val">
-                  {{ missionChip.returnOnly ? `최초 시작점 복귀 (${missionChip.percent}%)` : `${missionChip.current} / ${missionChip.total} (${missionChip.percent}%)` }}
+                  {{ missionChip.returnOnly ? `Returning to mission start (${missionChip.percent}%)` : `${missionChip.current} / ${missionChip.total} (${missionChip.percent}%)` }}
                 </span></span>
                 <span v-if="missionChip.eta" class="popover-row"><span class="popover-key">ETA</span><span class="popover-val">{{ missionChip.eta }}</span></span>
               </span>
@@ -5708,7 +5725,7 @@ onUnmounted(() => {
                 <span class="chip-popover" :style="popoverStyle">
                   <span class="popover-row" v-for="r in batteryChip.rows" :key="r[0]"><span class="popover-key">{{ r[0] }}</span><span :class="['popover-val', r[2] && `popover-val-${r[2]}`]">{{ r[1] }}</span></span>
                   <span class="popover-row popover-actions">
-                    <button class="btn btn-ghost btn-sm" @click.stop="openBatteryCal">전압 보정</button>
+                    <button class="btn btn-ghost btn-sm" @click.stop="openBatteryCal">Calibrate voltage</button>
                   </span>
                 </span>
               </span>
@@ -5730,7 +5747,7 @@ onUnmounted(() => {
                     {{ m.label }}
                   </button>
                   <div class="navlight-bright" @click.stop>
-                    <span class="navlight-bright-label">TSAL 밝기 {{ Math.round(ledBrightness / 255 * 100) }}%</span>
+                    <span class="navlight-bright-label">TSAL brightness {{ Math.round(ledBrightness / 255 * 100) }}%</span>
                     <input
                       type="range" min="0" max="255" step="5"
                       :value="ledBrightness"
@@ -5738,7 +5755,7 @@ onUnmounted(() => {
                     />
                   </div>
                   <div class="navlight-bright" @click.stop>
-                    <span class="navlight-bright-label">분사 시간 {{ pumpDuration.toFixed(1) }}s</span>
+                    <span class="navlight-bright-label">Dispense time {{ pumpDuration.toFixed(1) }}s</span>
                     <input
                       type="range" min="0.5" max="10" step="0.5"
                       :value="pumpDuration"
@@ -5753,8 +5770,8 @@ onUnmounted(() => {
           <button
             v-if="fullscreenSupported"
             class="fullscreen-btn"
-            :title="isFullscreen ? '전체화면 종료' : '전체화면'"
-            :aria-label="isFullscreen ? '전체화면 종료' : '전체화면'"
+            :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
+            :aria-label="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
             @click="toggleFullscreen"
           >
             <svg v-if="!isFullscreen" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
@@ -5769,7 +5786,7 @@ onUnmounted(() => {
         <div class="workspace-body">
           <div v-if="!isMobile" class="edge-spacer"></div>
           <!-- Left icon rail -->
-          <nav class="rail" aria-label="인스펙터 카테고리">
+          <nav class="rail" aria-label="Inspector sections">
             <button
               v-for="t in visibleTabs" :key="t.key"
               :class="['rail-btn', { active: activeTab === t.key }]"
@@ -5793,19 +5810,19 @@ onUnmounted(() => {
               class="fab-icon-btn map-fab-rotate"
               :style="isMobile ? { position: 'fixed', left: '0.75rem', bottom: `calc(${sheetHeight}px + env(safe-area-inset-bottom) + 70px)`, zIndex: 650 } : null"
               @click="rotateMap"
-              aria-label="지도 90° 회전"
-              title="지도 90° 회전 (반시계방향)"
+              aria-label="Rotate map 90°"
+              title="Rotate map 90° (counterclockwise)"
             >
               <CourseMapIcon name="rotate" />
             </button>
             <!-- Path pick overlay stays inside the map area -->
             <div v-if="roverMode === 'path-pick'" class="map-overlay map-overlay-row">
-              <span>시작점을 지도에서 클릭하거나</span>
+              <span>Click a start point on the map, or</span>
               <button
                 class="btn btn-primary btn-sm"
                 :disabled="!roverStatus.connected || !roverStatus.last_position"
                 @click="computePathFromRover"
-              >현재 로버 위치에서 시작</button>
+              >Start from the rover position</button>
             </div>
 
             <!-- Cone-add edit controls (courses tab) — bottom-right of the map. -->
@@ -5817,20 +5834,20 @@ onUnmounted(() => {
               <button
                 :class="['fab-icon-btn', 'fab-lock', { locked: editLocked }]"
                 @click="editLocked = !editLocked"
-                :aria-label="editLocked ? '편집 잠김 (눌러서 해제)' : '편집 가능 (눌러서 잠금)'"
-                :title="editLocked ? '편집 잠김 — 화면 탭/드래그로 콘 추가·이동 불가 (눌러서 해제)' : '편집 가능 — 눌러서 잠그면 화면 탭/드래그 편집 방지'"
+                :aria-label="editLocked ? 'Editing locked (tap to unlock)' : 'Editing unlocked (tap to lock)'"
+                :title="editLocked ? 'Editing locked — map taps and drags cannot add or move cones (tap to unlock)' : 'Editing unlocked — tap to lock and block map tap and drag edits'"
               >{{ editLocked ? '🔒' : '🔓' }}</button>
               <button
                 class="fab-icon-btn fab-undo"
                 :disabled="editLocked || undoStack.length === 0"
                 @click="performUndo"
-                aria-label="실행취소"
-                title="마지막 작업 실행취소 (Ctrl+Z)"
+                aria-label="Undo"
+                title="Undo last action (Ctrl+Z)"
               >↩</button>
               <div class="side-toggle">
-                <button :class="['side-btn', { active: currentSide === 'left' }]" @click="currentSide = 'left'" style="--side-color: #f59e0b" title="왼쪽">L</button>
-                <button :class="['side-btn', { active: currentSide === 'center' }]" @click="currentSide = 'center'" style="--side-color: #ef4444" title="가운데">C</button>
-                <button :class="['side-btn', { active: currentSide === 'right' }]" @click="currentSide = 'right'" style="--side-color: #06b6d4" title="오른쪽">R</button>
+                <button :class="['side-btn', { active: currentSide === 'left' }]" @click="currentSide = 'left'" style="--side-color: #f59e0b" title="Left">L</button>
+                <button :class="['side-btn', { active: currentSide === 'center' }]" @click="currentSide = 'center'" style="--side-color: #ef4444" title="Center">C</button>
+                <button :class="['side-btn', { active: currentSide === 'right' }]" @click="currentSide = 'right'" style="--side-color: #06b6d4" title="Right">R</button>
               </div>
               <button
                 :class="['fab-icon-btn', 'fab-rover', { 'src-receiver': positionSource === 'receiver', 'src-rover': positionSource === 'rover' }]"
@@ -5840,7 +5857,7 @@ onUnmounted(() => {
               >{{ roverLoading ? '⏳' : coneCaptureIcon }}</button>
             </div>
 
-            <!-- Measurement / selection tools (영역 · 자 · 각도기) — separate
+            <!-- Measurement / selection tools (Area · Ruler · Protractor) — separate
                  top-right panel. Read-only, usable even when editing is locked. -->
             <div
               v-if="activeTab === 'courses' && activeCourse"
@@ -5850,40 +5867,40 @@ onUnmounted(() => {
                 :class="['fab-icon-btn', 'fab-tool', { active: routeEditMode }]"
                 :disabled="editLocked"
                 @click="toggleRouteEditMode"
-                aria-label="주행 순서 마커 편집"
-                :title="editLocked ? '편집 잠금을 해제해야 주행 마커를 배치할 수 있습니다' : '주행 순서 — 지도에 마커 배치·이동, 마커 탭으로 방문 추가'"
+                aria-label="Edit route markers"
+                :title="editLocked ? 'Unlock editing to place route markers' : 'Route order — place or move markers on the map; tap a marker to add a visit'"
               >🚩</button>
               <button
                 :class="['fab-icon-btn', 'fab-tool', { active: showCenterline }]"
                 @click="showCenterline = !showCenterline"
-                aria-label="중심선 표시"
-                title="중심선 — 코스 중심선 표시/숨김"
+                aria-label="Show centerline"
+                title="Centerline — show or hide the course centerline"
               >
                 <CourseMapIcon name="centerline" />
               </button>
               <button
                 :class="['fab-icon-btn', 'fab-tool', { active: selectMode }]"
                 @click="selectMode = !selectMode"
-                aria-label="영역 선택 모드"
-                title="영역 — 드래그로 여러 콘 선택 (터치 지원)"
+                aria-label="Area select mode"
+                title="Area — drag to select multiple cones (touch supported)"
               >⬚</button>
               <button
                 :class="['fab-icon-btn', 'fab-tool', { active: toolMode === 'ruler' }]"
                 @click="enterToolMode('ruler')"
-                aria-label="거리 측정"
-                title="자 — 콘 사이 거리 측정"
+                aria-label="Measure distance"
+                title="Ruler — measure the distance between cones"
               ><CourseMapIcon name="ruler" /></button>
               <button
                 :class="['fab-icon-btn', 'fab-tool', { active: toolMode === 'protractor' }]"
                 @click="enterToolMode('protractor')"
-                aria-label="각도 측정"
-                title="각도기 — 콘 3개의 각도 측정"
+                aria-label="Measure angle"
+                title="Protractor — measure the angle between 3 cones"
               ><CourseMapIcon name="protractor" /></button>
               <button
                 class="fab-icon-btn fab-tool"
                 @click="addMemo"
-                aria-label="메모 추가"
-                title="메모 — 지도 중앙에 메모 스티커 추가"
+                aria-label="Add memo"
+                title="Memo — add a memo sticker at the map center"
               >📝</button>
             </div>
 
@@ -5891,33 +5908,33 @@ onUnmounted(() => {
             <div v-if="rotateMode" class="rotate-hud">
               <span class="rotate-hud-icon">{{ rotateDirIcon }}</span>
               <span class="rotate-hud-val">{{ rotateAngleAbs }}°</span>
-              <span class="rotate-hud-hint">핸들을 돌려 회전 · Shift: 5° 단위</span>
+              <span class="rotate-hud-hint">Drag the handle to rotate · Shift: 5° steps</span>
             </div>
 
             <!-- Measurement tool overlay (distance / angle). -->
             <div v-if="toolMode !== 'none'" class="map-overlay map-overlay-row measure-overlay">
-              <span class="measure-tool-name">{{ toolMode === 'ruler' ? '📏 거리' : '📐 각도' }}</span>
+              <span class="measure-tool-name">{{ toolMode === 'ruler' ? '📏 Distance' : '📐 Angle' }}</span>
               <span v-if="measureResult" class="measure-result">{{ measureResult }}</span>
-              <button class="btn btn-ghost btn-sm" @click="resetMeasure">초기화</button>
-              <button class="btn btn-ghost btn-sm" @click="exitToolMode">닫기</button>
+              <button class="btn btn-ghost btn-sm" @click="resetMeasure">Reset</button>
+              <button class="btn btn-ghost btn-sm" @click="exitToolMode">Close</button>
             </div>
 
             <!-- Box-select mode overlay. -->
             <div v-if="selectMode" class="map-overlay map-overlay-row measure-overlay">
-              <span class="measure-tool-name">⬚ 선택</span>
-              <span class="measure-hint">드래그로 영역 선택 · 콘 탭으로 토글</span>
-              <span v-if="multiSelectedIds.size" class="measure-result">{{ multiSelectedIds.size }}개</span>
-              <button v-if="multiSelectedIds.size" class="btn btn-ghost btn-sm" @click="clearMultiSelection">해제</button>
-              <button class="btn btn-ghost btn-sm" @click="selectMode = false">닫기</button>
+              <span class="measure-tool-name">⬚ Select</span>
+              <span class="measure-hint">Drag to select an area · tap a cone to toggle it</span>
+              <span v-if="multiSelectedIds.size" class="measure-result">{{ multiSelectedIds.size }} selected</span>
+              <button v-if="multiSelectedIds.size" class="btn btn-ghost btn-sm" @click="clearMultiSelection">Clear</button>
+              <button class="btn btn-ghost btn-sm" @click="selectMode = false">Close</button>
             </div>
 
             <!-- Reusable marker placement: tapping empty pavement creates one
                  physical marker; tapping an existing marker appends a visit. -->
             <div v-if="routeEditMode" class="map-overlay map-overlay-row measure-overlay route-overlay">
-              <span class="measure-tool-name">🚩 주행 순서</span>
-              <span class="measure-hint">빈 곳 탭: 마커 추가 · 마커 탭: 방문 추가 · 드래그: 이동</span>
-              <span class="measure-result">{{ activeRoute.markers.length }}개 / {{ activeRoute.steps.length }}단계</span>
-              <button class="btn btn-ghost btn-sm" @click="routeEditMode = false">닫기</button>
+              <span class="measure-tool-name">🚩 Route order</span>
+              <span class="measure-hint">Tap empty space: add marker · tap marker: add visit · drag: move</span>
+              <span class="measure-result">{{ activeRoute.markers.length }} markers / {{ activeRoute.steps.length }} steps</span>
+              <button class="btn btn-ghost btn-sm" @click="routeEditMode = false">Close</button>
             </div>
 
             <!-- Memo label layer — geo-anchored text annotations over the map.
@@ -5936,21 +5953,21 @@ onUnmounted(() => {
                   class="memo-text"
                   type="text"
                   v-model="m.content"
-                  placeholder="라벨"
+                  placeholder="Label"
                   @focus="onMemoFocus(m)"
                   @blur="onMemoBlur(m)"
                   @pointerdown.stop
                 />
-                <span class="memo-move" @pointerdown="onMemoDragStart(m, $event)" title="드래그하여 이동" aria-label="이동">
+                <span class="memo-move" @pointerdown="onMemoDragStart(m, $event)" title="Drag to move" aria-label="Move">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
                 </span>
-                <button class="memo-del" @pointerdown.stop @click="deleteMemo(m.id)" title="라벨 삭제" aria-label="삭제">
+                <button class="memo-del" @pointerdown.stop @click="deleteMemo(m.id)" title="Delete label" aria-label="Delete">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" aria-hidden="true"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
                 </button>
-                <span class="memo-rotate" @pointerdown="onMemoRotateStart(m, $event)" title="드래그하여 회전 · 클릭하면 초기화" aria-label="회전 (클릭 시 초기화)">
+                <span class="memo-rotate" @pointerdown="onMemoRotateStart(m, $event)" title="Drag to rotate · click to reset" aria-label="Rotate (click to reset)">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
                 </span>
-                <span class="memo-resize" @pointerdown="onMemoResizeStart(m, $event)" title="드래그하여 크기 조절" aria-label="크기 조절">
+                <span class="memo-resize" @pointerdown="onMemoResizeStart(m, $event)" title="Drag to resize" aria-label="Resize">
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>
                 </span>
               </div>
@@ -5966,7 +5983,7 @@ onUnmounted(() => {
             @pointermove="onInspectorResizeMove"
             @pointerup="onInspectorResizeEnd"
             @pointercancel="onInspectorResizeEnd"
-            aria-label="인스펙터 너비 조절"
+            aria-label="Resize inspector"
           ></div>
 
           <!-- Inspector -->
@@ -5988,14 +6005,14 @@ onUnmounted(() => {
               <!-- Courses tab (merged with cones) -->
               <section v-show="activeTab === 'courses'" class="tab-pane">
                 <header class="tab-header">
-                  <h3>코스 관리</h3>
+                  <h3>Course management</h3>
                 </header>
                 <div class="course-add">
-                  <input v-model="newCourseName" placeholder="새 코스 이름" maxlength="100" @keyup.enter="createCourse" />
-                  <button class="btn btn-primary btn-lg-touch btn-icon-only" @click="createCourse" :disabled="!newCourseName.trim()" title="코스 추가">
+                  <input v-model="newCourseName" placeholder="New course name" maxlength="100" @keyup.enter="createCourse" />
+                  <button class="btn btn-primary btn-lg-touch btn-icon-only" @click="createCourse" :disabled="!newCourseName.trim()" title="Add course">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
                   </button>
-                  <button class="btn btn-ghost btn-lg-touch btn-icon-only" @click="triggerImport" :disabled="!newCourseName.trim()" title="JSON 가져오기 (입력한 이름으로 추가)">
+                  <button class="btn btn-ghost btn-lg-touch btn-icon-only" @click="triggerImport" :disabled="!newCourseName.trim()" title="Import JSON (adds it under the entered name)">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="18" height="18"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                   </button>
                   <input ref="importInput" type="file" accept=".json" hidden @change="importCourse" />
@@ -6005,8 +6022,8 @@ onUnmounted(() => {
                     class="btn btn-ghost btn-lg-touch"
                     :disabled="!activeCourseId"
                     @click="openSnapshots"
-                    title="스냅샷"
-                  >📸 스냅샷</button>
+                    title="Snapshots"
+                  >📸 Snapshots</button>
                 </div>
                 <div class="course-items">
                   <div
@@ -6014,42 +6031,42 @@ onUnmounted(() => {
                     :class="['course-item', { active: c.id === activeCourseId, editing: editingCourseId === c.id }]"
                     @click="selectCourse(c.id)"
                   >
-                    <button class="vis-btn" @click.stop="toggleVisibility(c.id)" :disabled="c.id === activeCourseId" aria-label="코스 표시" :aria-pressed="c.id === activeCourseId || visibility[c.id] === true" title="코스 표시">
+                    <button class="vis-btn" @click.stop="toggleVisibility(c.id)" :disabled="c.id === activeCourseId" aria-label="Show course" :aria-pressed="c.id === activeCourseId || visibility[c.id] === true" title="Show course">
                       <svg v-if="c.id === activeCourseId || visibility[c.id]" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
                       <svg v-else viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M17.94 17.94A10.07 10.07 0 0112 20c-7 0-11-8-11-8a18.45 18.45 0 015.06-5.94M9.9 4.24A9.12 9.12 0 0112 4c7 0 11 8 11 8a18.5 18.5 0 01-2.16 3.19m-6.72-1.07a3 3 0 11-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
                     </button>
                     <template v-if="editingCourseId === c.id">
                       <input v-model="editCourseName" class="course-name-input" @keyup.enter="saveCourseName(c.id)" @keyup.escape="editingCourseId = null" @click.stop />
-                      <button class="btn btn-primary btn-sm" @click.stop="saveCourseName(c.id)">저장</button>
+                      <button class="btn btn-primary btn-sm" @click.stop="saveCourseName(c.id)">Save</button>
                     </template>
                     <template v-else>
                       <span class="course-name" @dblclick.stop="startEditCourse(c)">
                         {{ c.name }} <span class="cone-count">({{ c.cone_count }})</span>
                       </span>
                     </template>
-                    <button v-if="canManageCourse" class="btn btn-ghost btn-sm" :aria-pressed="!!c.is_public" :aria-label="c.is_public ? '공개 해제' : '코스 공개'" :disabled="publishingId != null" @click.stop="togglePublication(c)" :title="c.is_public ? '경기 코스 공개 해제' : '경기 코스에 공개'">
-                      {{ c.is_public ? '공개 중' : '비공개' }}
+                    <button v-if="canManageCourse && host.features.publication" class="btn btn-ghost btn-sm" :aria-pressed="!!c.is_public" :aria-label="c.is_public ? 'Unpublish' : 'Publish course'" :disabled="publishingId != null" @click.stop="togglePublication(c)" :title="c.is_public ? 'Remove from the public course page' : 'Publish to the public course page'">
+                      {{ c.is_public ? 'Published' : 'Private' }}
                     </button>
-                    <button class="dl-btn" @click.stop="exportCourse(c.id)" :disabled="exportingId === c.id" :title="exportingId === c.id ? '내보내는 중…' : 'ZIP 내보내기 (AC 트랙 + JSON + 미리보기)'">
+                    <button class="dl-btn" @click.stop="exportCourse(c.id)" :disabled="exportingId === c.id" :title="exportingId === c.id ? 'Exporting…' : 'Export ZIP (AC track + JSON + preview)'">
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="16" height="16"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
                     </button>
-                    <button v-if="canManageCourse" class="del-btn" @click.stop="deleteCourse(c.id)" title="삭제">×</button>
+                    <button v-if="canManageCourse" class="del-btn" @click.stop="deleteCourse(c.id)" title="Delete">×</button>
                   </div>
-                  <div v-if="courses.length === 0" class="empty-msg">코스를 추가하세요.</div>
+                  <div v-if="courses.length === 0" class="empty-msg">Add a course.</div>
                 </div>
 
                 <!-- Cones panel for the selected course -->
                 <template v-if="activeCourse">
                   <header class="tab-header tab-header-sub">
-                    <h3>{{ activeCourse.name }}<span v-if="centerline?.ok" class="centerline-len"> ({{ Math.round(centerline.length) }} m{{ routeModeSuffix }})</span><span v-if="editLocked" class="lock-badge" title="편집 잠김">🔒</span></h3>
+                    <h3>{{ activeCourse.name }}<span v-if="centerline?.ok" class="centerline-len"> ({{ Math.round(centerline.length) }} m{{ routeModeSuffix }})</span><span v-if="editLocked" class="lock-badge" title="Editing locked">🔒</span></h3>
                   </header>
 
                   <div class="inspector-group route-editor">
                     <div class="route-editor-heading">
-                      <div class="group-title">주행 순서 마커</div>
+                      <div class="group-title">Route markers</div>
                       <span :class="['route-mode-badge', { guided: routeMode === ROUTE_MODE.GUIDED, oriented: routeMode === ROUTE_MODE.ORIENTED }]">{{ routeModeLabel }}</span>
                     </div>
-                    <p class="hint">마커가 2단계 이상이면 표시 순서대로 중심선을 만듭니다. 같은 마커를 반복 방문에 여러 번 사용할 수 있습니다.</p>
+                    <p class="hint">With 2 or more steps, the centerline follows the listed order. A marker can be reused for repeat visits.</p>
                     <p v-if="routeError" class="route-error">{{ routeError }}</p>
                     <div class="route-marker-list">
                       <div v-for="(marker, markerIndex) in activeRoute.markers" :key="marker.id" class="route-marker-row">
@@ -6058,89 +6075,89 @@ onUnmounted(() => {
                           :value="marker.label"
                           maxlength="50"
                           :disabled="editLocked"
-                          aria-label="주행 마커 이름"
+                          aria-label="Route marker name"
                           @change="updateRouteMarker(marker, { label: $event.target.value })"
                         />
-                        <button class="btn btn-ghost btn-sm route-icon-action" :disabled="editLocked" @click="appendRouteVisit(marker.id)" title="방문 단계 맨 뒤에 추가">＋</button>
-                        <button class="del-btn" :disabled="editLocked" @click="deleteRouteMarker(marker)" title="마커와 해당 방문 삭제">×</button>
+                        <button class="btn btn-ghost btn-sm route-icon-action" :disabled="editLocked" @click="appendRouteVisit(marker.id)" title="Add a visit at the end">＋</button>
+                        <button class="del-btn" :disabled="editLocked" @click="deleteRouteMarker(marker)" title="Delete the marker and its visits">×</button>
                       </div>
-                      <div v-if="activeRoute.markers.length === 0" class="empty-msg">잠금을 풀고 🚩 도구로 노면 위에 마커를 배치하세요.</div>
+                      <div v-if="activeRoute.markers.length === 0" class="empty-msg">Unlock editing and place markers on the track surface with the 🚩 tool.</div>
                     </div>
                     <div v-if="activeRoute.steps.length" class="route-step-list">
                       <div v-for="(markerId, index) in activeRoute.steps" :key="`${index}-${markerId}`" class="route-step-row">
                         <span class="route-step-rank">{{ index + 1 }}</span>
                         <span class="route-step-name">{{ routeMarkerById.get(markerId)?.label || `M${markerId}` }}</span>
-                        <button class="route-step-action" :disabled="editLocked || index === 0" @click="moveRouteVisit(index, -1)" title="앞으로">↑</button>
-                        <button class="route-step-action" :disabled="editLocked || index === activeRoute.steps.length - 1" @click="moveRouteVisit(index, 1)" title="뒤로">↓</button>
-                        <button class="route-step-action danger" :disabled="editLocked" @click="removeRouteVisit(index)" title="이 방문만 삭제">×</button>
+                        <button class="route-step-action" :disabled="editLocked || index === 0" @click="moveRouteVisit(index, -1)" title="Move earlier">↑</button>
+                        <button class="route-step-action" :disabled="editLocked || index === activeRoute.steps.length - 1" @click="moveRouteVisit(index, 1)" title="Move later">↓</button>
+                        <button class="route-step-action danger" :disabled="editLocked" @click="removeRouteVisit(index)" title="Delete only this visit">×</button>
                       </div>
                     </div>
                     <div class="route-editor-actions">
-                      <button class="btn btn-ghost btn-sm" :disabled="editLocked" @click="toggleRouteEditMode">{{ routeEditMode ? '배치 종료' : '지도에서 배치' }}</button>
-                      <button class="btn btn-ghost btn-sm" :disabled="editLocked || activeRoute.steps.length === 0" @click="saveRouteSteps([])">순서 초기화</button>
+                      <button class="btn btn-ghost btn-sm" :disabled="editLocked" @click="toggleRouteEditMode">{{ routeEditMode ? 'Stop placing' : 'Place on map' }}</button>
+                      <button class="btn btn-ghost btn-sm" :disabled="editLocked || activeRoute.steps.length === 0" @click="saveRouteSteps([])">Reset order</button>
                     </div>
                   </div>
 
                   <div v-if="multiSelectedIds.size > 0" class="inspector-group selected">
-                    <div class="group-title">{{ multiSelectedIds.size }}개 선택됨</div>
-                    <p class="multi-select-hint" v-if="!editLocked">드래그로 이동 · 회전 · 삭제(Del)</p>
-                    <p class="multi-select-hint locked-note" v-else>🔒 편집 잠김 — 이동·회전·삭제 불가</p>
+                    <div class="group-title">{{ multiSelectedIds.size }} selected</div>
+                    <p class="multi-select-hint" v-if="!editLocked">Drag to move · rotate · delete (Del)</p>
+                    <p class="multi-select-hint locked-note" v-else>🔒 Editing locked — cannot move, rotate, or delete</p>
                     <div class="edit-buttons">
                       <button
                         :class="['btn', 'btn-lg-touch', rotateMode ? 'btn-primary' : 'btn-ghost']"
                         :disabled="editLocked || multiSelectedIds.size < 2"
                         @click="enterRotateMode"
-                        title="선택한 콘을 중심점 기준으로 회전"
-                      >{{ rotateMode ? '회전 종료' : '회전' }}</button>
-                      <button class="btn btn-danger btn-lg-touch" :disabled="editLocked" @click="deleteSelected">삭제 ({{ multiSelectedIds.size }})</button>
-                      <button class="btn btn-ghost btn-lg-touch" @click="clearMultiSelection">선택 해제</button>
+                        title="Rotate the selected cones around their center"
+                      >{{ rotateMode ? 'Stop rotating' : 'Rotate' }}</button>
+                      <button class="btn btn-danger btn-lg-touch" :disabled="editLocked" @click="deleteSelected">Delete ({{ multiSelectedIds.size }})</button>
+                      <button class="btn btn-ghost btn-lg-touch" @click="clearMultiSelection">Clear selection</button>
                     </div>
                     <div v-if="rotateMode" class="rotate-controls">
-                      <label>정확한 각도</label>
-                      <input v-model="rotateInput" type="number" step="any" placeholder="시계방향 +, 예: 90" @keyup.enter="applyRotateInput" />
-                      <button class="btn btn-ghost btn-sm" @click="applyRotateInput">적용</button>
+                      <label>Exact angle</label>
+                      <input v-model="rotateInput" type="number" step="any" placeholder="Clockwise +, e.g. 90" @keyup.enter="applyRotateInput" />
+                      <button class="btn btn-ghost btn-sm" @click="applyRotateInput">Apply</button>
                     </div>
                   </div>
 
                   <div v-if="selectedConeId && multiSelectedIds.size === 0" class="inspector-group selected">
-                    <div class="group-title">콘 수정 #{{ activeConeSideRanks.get(selectedConeId) || 0 }}</div>
+                    <div class="group-title">Edit cone #{{ activeConeSideRanks.get(selectedConeId) || 0 }}</div>
                     <div class="coord-inputs">
-                      <input v-model="editLat" type="number" step="any" placeholder="위도" />
-                      <input v-model="editLng" type="number" step="any" placeholder="경도" />
+                      <input v-model="editLat" type="number" step="any" placeholder="Latitude" />
+                      <input v-model="editLng" type="number" step="any" placeholder="Longitude" />
                       <select v-model="editSide">
-                        <option value="left">L 왼쪽</option>
-                        <option value="center">C 가운데</option>
-                        <option value="right">R 오른쪽</option>
+                        <option value="left">L Left</option>
+                        <option value="center">C Center</option>
+                        <option value="right">R Right</option>
                       </select>
                     </div>
-                    <div v-if="selectedCone && selectedCone.alt != null" class="cone-alt-readout" title="고도 (MSL) — RTK 측정값, 편집 불가">
-                      고도 {{ formatAlt(selectedCone.alt) }} m
+                    <div v-if="selectedCone && selectedCone.alt != null" class="cone-alt-readout" title="Altitude (MSL) — RTK measurement, read-only">
+                      Altitude {{ formatAlt(selectedCone.alt) }} m
                     </div>
                     <div class="edit-buttons">
-                      <button class="btn btn-primary btn-lg-touch" @click="updateCone">저장</button>
-                      <button class="btn btn-danger btn-lg-touch" @click="deleteCone(selectedConeId)">삭제</button>
-                      <button class="btn btn-ghost btn-lg-touch" @click="selectedConeId = null">취소</button>
+                      <button class="btn btn-primary btn-lg-touch" @click="updateCone">Save</button>
+                      <button class="btn btn-danger btn-lg-touch" @click="deleteCone(selectedConeId)">Delete</button>
+                      <button class="btn btn-ghost btn-lg-touch" @click="selectedConeId = null">Cancel</button>
                     </div>
                     <div v-if="!hasMarkerRoute" class="edit-buttons">
                       <button
                         :class="['btn', 'btn-lg-touch', isStartCone ? 'btn-primary' : 'btn-ghost']"
                         @click="setStartCone"
-                        title="이 콘에서 가장 가까운 센터라인 지점을 코스 시작점으로 지정"
-                      >{{ isStartCone ? '시작점 해제' : '시작점 지정' }}</button>
+                        title="Set the centerline point nearest this cone as the course start"
+                      >{{ isStartCone ? 'Clear start cone' : 'Set start cone' }}</button>
                     </div>
                   </div>
 
                   <div class="inspector-group cone-list-section">
                     <div class="cone-list-header">
                       <div class="group-title">
-                        목록 ({{ filteredCones.length }})
+                        Cones ({{ filteredCones.length }})
                         <span v-if="coneFilter !== 'all'" class="filter-tag" :style="{ '--fc': SIDE_COLORS[coneFilter] }">{{ coneFilterLabel }}</span>
                       </div>
                       <div class="cone-filter">
-                        <button :class="['filter-btn', { active: coneFilter === 'all' }]" @click="coneFilter = 'all'" title="전체 콘 표시">전체</button>
-                        <button :class="['filter-btn', { active: coneFilter === 'left' }]" @click="coneFilter = 'left'" :style="{ '--fc': SIDE_COLORS.left }" title="왼쪽">L</button>
-                        <button :class="['filter-btn', { active: coneFilter === 'center' }]" @click="coneFilter = 'center'" :style="{ '--fc': SIDE_COLORS.center }" title="가운데">C</button>
-                        <button :class="['filter-btn', { active: coneFilter === 'right' }]" @click="coneFilter = 'right'" :style="{ '--fc': SIDE_COLORS.right }" title="오른쪽">R</button>
+                        <button :class="['filter-btn', { active: coneFilter === 'all' }]" @click="coneFilter = 'all'" title="Show all cones">All</button>
+                        <button :class="['filter-btn', { active: coneFilter === 'left' }]" @click="coneFilter = 'left'" :style="{ '--fc': SIDE_COLORS.left }" title="Left">L</button>
+                        <button :class="['filter-btn', { active: coneFilter === 'center' }]" @click="coneFilter = 'center'" :style="{ '--fc': SIDE_COLORS.center }" title="Center">C</button>
+                        <button :class="['filter-btn', { active: coneFilter === 'right' }]" @click="coneFilter = 'right'" :style="{ '--fc': SIDE_COLORS.right }" title="Right">R</button>
                       </div>
                     </div>
                     <div class="cone-list" ref="coneListEl" @scroll="onConeListScroll">
@@ -6152,22 +6169,22 @@ onUnmounted(() => {
                       >
                         <span class="cone-num" :style="{ color: SIDE_COLORS[cone.side] }">#{{ activeConeSideRanks.get(cone.id) || 0 }}</span>
                         <span class="cone-coords">{{ formatLatLng(cone.lat, cone.lng) }}</span>
-                        <span v-if="cone.alt != null" class="cone-alt" title="고도 (MSL)">{{ formatAlt(cone.alt) }} m</span>
-                        <button class="del-btn" @click.stop="deleteCone(cone.id)" title="삭제">×</button>
+                        <span v-if="cone.alt != null" class="cone-alt" title="Altitude (MSL)">{{ formatAlt(cone.alt) }} m</span>
+                        <button class="del-btn" @click.stop="deleteCone(cone.id)" title="Delete">×</button>
                       </div>
-                      <div v-if="filteredCones.length === 0" class="empty-msg">콘이 없습니다.</div>
+                      <div v-if="filteredCones.length === 0" class="empty-msg">No cones.</div>
                     </div>
                     <button
                       v-show="coneListScrolled"
                       class="cone-scrolltop"
                       @click="scrollConeListTop"
-                      title="목록 맨 위로"
+                      title="Back to top"
                     >↑</button>
                     <button
                       class="btn btn-danger cone-delete-all"
                       :disabled="activeCones.length === 0"
                       @click="deleteAllCones"
-                    >전체 삭제</button>
+                    >Delete all</button>
                   </div>
                 </template>
               </section>
@@ -6219,37 +6236,37 @@ onUnmounted(() => {
                     <button
                       :class="['btn', 'btn-lg-touch', followRover ? 'btn-primary' : 'btn-ghost']"
                       @click="toggleFollowRover"
-                    >로버 추적</button>
+                    >Follow rover</button>
                   </div>
                   <button
                     v-if="roverStatus.connected"
                     class="btn btn-lg-touch btn-ghost manual-btn-row"
                     @click="openCalibration"
-                  >보정</button>
-                  코스를 먼저 선택하세요.
-                  <button class="btn btn-ghost btn-lg-touch" @click="activeTab = 'courses'">코스 탭으로</button>
+                  >Calibration</button>
+                  Select a course first.
+                  <button class="btn btn-ghost btn-lg-touch" @click="activeTab = 'courses'">Go to courses</button>
                 </div>
                 <template v-else>
                   <!-- All always-on rover controls share ONE grid so they lay
                        out 2 per row (2×2). -->
                   <div class="rover-controls rover-controls-grid two-col">
-                    <!-- Row 1: 로버 추적 · 수동 제어 -->
+                    <!-- Row 1: Follow rover · Manual control -->
                     <button
                       :class="['btn', 'btn-lg-touch', followRover ? 'btn-primary' : 'btn-ghost']"
                       :disabled="!roverStatus.connected"
                       @click="toggleFollowRover"
-                    >로버 추적</button>
+                    >Follow rover</button>
                     <button
                       :class="['btn', 'btn-lg-touch', roverMode === 'manual' ? 'btn-primary' : 'btn-ghost']"
                       :disabled="manualAuthorityReleaseBusy || (roverMode !== 'manual' && (!roverStatus.connected || (activeMission && !missionHeld) || roverStatus.nav_state === 'EMERGENCY_STOP'))"
                       @click="roverMode === 'manual' ? stopManualControl() : startManualControl()"
-                    >{{ manualAuthorityReleaseBusy ? '서버 제어 전환 중…' : '수동 제어' }}</button>
-                    <!-- Row 2: 보정 · 경로 계산 -->
+                    >{{ manualAuthorityReleaseBusy ? 'Handing over to the server…' : 'Manual control' }}</button>
+                    <!-- Row 2: Calibration · path action -->
                     <button
                       class="btn btn-lg-touch btn-ghost"
                       :disabled="!roverStatus.connected"
                       @click="openCalibration"
-                    >보정</button>
+                    >Calibration</button>
                     <button
                       :class="['btn', 'btn-lg-touch', pathBtnClass]"
                       @click="onPathBtn"
@@ -6266,20 +6283,20 @@ onUnmounted(() => {
                       class="btn btn-lg-touch btn-primary"
                       :disabled="pauseBusy || !roverStatus.connected"
                       @click="resumeMission"
-                    >▶ 재개</button>
+                    >▶ Resume</button>
                     <button
                       v-else
                       class="btn btn-lg-touch btn-ghost"
                       :disabled="pauseBusy || !roverStatus.connected || !PAUSABLE_NAV.has(roverStatus.nav_state)"
                       @click="pauseMission"
-                    >⏸ 일시정지</button>
+                    >⏸ Pause</button>
                   </div>
 
                   <div v-if="pathDistance > 0" class="path-info">
-                    <div>예상 주행 거리: {{ pathDistance >= 1000 ? (pathDistance / 1000).toFixed(2) + ' km' : pathDistance.toFixed(1) + ' m' }}</div>
+                    <div>Estimated distance: {{ pathDistance >= 1000 ? (pathDistance / 1000).toFixed(2) + ' km' : pathDistance.toFixed(1) + ' m' }}</div>
                     <div v-if="roverMode === 'executing' || roverMode === 'stopped'">
-                      <template v-if="pathWaypoints.length === 0 && missionFinishBehavior === 'return_to_start'">최초 미션 시작점 복귀</template>
-                      <template v-else>웨이포인트 {{ executedIndex }}/{{ pathWaypoints.length }}</template>
+                      <template v-if="pathWaypoints.length === 0 && missionFinishBehavior === 'return_to_start'">Return to mission start</template>
+                      <template v-else>Waypoint {{ executedIndex }}/{{ pathWaypoints.length }}</template>
                       <span v-if="pathProgress > 0" class="path-info-progress">({{ pathProgress }}%)</span>
                     </div>
                   </div>
@@ -6287,13 +6304,13 @@ onUnmounted(() => {
                   <!-- Waypoint reorder (path-ready only) -->
                   <div v-if="roverMode === 'path-ready'" class="rover-controls">
                     <button class="btn btn-lg-touch btn-ghost btn-block" @click="openMissionBuilder">
-                      콘 선택·순서·종료 동작 편집
+                      Edit cones, order, and finish behavior
                     </button>
                   </div>
                   <div v-if="roverMode === 'path-ready' && pathWaypoints.length > 1" class="inspector-group waypoint-list">
                     <div class="waypoint-list-header">
-                      <span>웨이포인트 ({{ pathWaypoints.length }})</span>
-                      <span class="waypoint-hint">↑↓로 순서 변경</span>
+                      <span>Waypoints ({{ pathWaypoints.length }})</span>
+                      <span class="waypoint-hint">Reorder with ↑↓</span>
                     </div>
                     <div
                       v-for="(wp, idx) in pathWaypoints" :key="`${wp.lat}-${wp.lng}-${idx}`"
@@ -6302,26 +6319,26 @@ onUnmounted(() => {
                       <span class="waypoint-num">#{{ idx + 1 }}</span>
                       <span class="waypoint-coord">{{ formatLatLng(wp.lat, wp.lng) }}</span>
                       <div class="waypoint-arrows">
-                        <button class="arrow-btn" :disabled="idx === 0" @click="moveWaypoint(idx, -1)" title="위로">↑</button>
-                        <button class="arrow-btn" :disabled="idx === pathWaypoints.length - 1" @click="moveWaypoint(idx, 1)" title="아래로">↓</button>
+                        <button class="arrow-btn" :disabled="idx === 0" @click="moveWaypoint(idx, -1)" title="Move up">↑</button>
+                        <button class="arrow-btn" :disabled="idx === pathWaypoints.length - 1" @click="moveWaypoint(idx, 1)" title="Move down">↓</button>
                       </div>
                     </div>
                   </div>
 
                   <!-- Abandon the preserved (e-stop/interrupted) mission. Map taps
                        no longer do this — only this explicit button — so a stray
-                       tap can't wipe "이어서 실행". -->
+                       tap can't wipe "Resume mission". -->
                   <div v-if="roverMode === 'stopped'" class="rover-controls mission-held-actions">
                     <button
                       class="btn btn-lg-touch btn-ghost"
                       :disabled="!missionHeld"
                       @click="openMissionBuilder"
-                    >남은 경로 편집</button>
+                    >Edit remaining route</button>
                     <button
                       class="btn btn-lg-touch btn-danger btn-block"
                       :disabled="stopping || missionEndBusy || missionEndAwaitingAckId === activeMissionAuthority?.id"
                       @click="abandonMission"
-                    >{{ missionEndBusy || missionEndAwaitingAckId === activeMissionAuthority?.id ? '정지 확인 대기…' : '미션 종료' }}</button>
+                    >{{ missionEndBusy || missionEndAwaitingAckId === activeMissionAuthority?.id ? 'Awaiting stop confirmation…' : 'End mission' }}</button>
                   </div>
 
                   <!-- Manual joystick -->
@@ -6362,16 +6379,16 @@ onUnmounted(() => {
               <!-- History tab (missions + logs) -->
               <section v-show="activeTab === 'history'" class="tab-pane">
                 <header class="tab-header">
-                  <h3>{{ historyView === 'missions' ? '미션 이력' : '로버 로그' }}</h3>
+                  <h3>{{ historyView === 'missions' ? 'Mission history' : 'Rover logs' }}</h3>
                   <div class="history-switcher">
-                    <button :class="['history-switch-btn', { active: historyView === 'missions' }]" @click="historyView = 'missions'">이력</button>
-                    <button :class="['history-switch-btn', { active: historyView === 'logs' }]" @click="historyView = 'logs'">로그</button>
+                    <button :class="['history-switch-btn', { active: historyView === 'missions' }]" @click="historyView = 'missions'">Missions</button>
+                    <button :class="['history-switch-btn', { active: historyView === 'logs' }]" @click="historyView = 'logs'">Logs</button>
                   </div>
                 </header>
 
                 <template v-if="historyView === 'missions'">
-                  <div v-if="missionLoading" class="empty-msg">불러오는 중...</div>
-                  <div v-else-if="missions.length === 0" class="empty-msg">기록된 미션이 없습니다.</div>
+                  <div v-if="missionLoading" class="empty-msg">Loading...</div>
+                  <div v-else-if="missions.length === 0" class="empty-msg">No recorded missions.</div>
                   <div v-else class="missions-list-inline">
                     <div
                       v-for="m in missions" :key="m.id"
@@ -6389,11 +6406,11 @@ onUnmounted(() => {
                         <span>· {{ formatMissionDuration(m.started_at, m.ended_at) }}</span>
                         <span v-if="m.course_name">· {{ m.course_name }}</span>
                       </div>
-                      <div class="mission-meta-sub">{{ m.sample_count }}개 샘플</div>
+                      <div class="mission-meta-sub">{{ m.sample_count }} samples</div>
                     </div>
                     <div v-if="missions.length < missionTotal" class="load-more">
                       <button class="btn btn-ghost btn-lg-touch" :disabled="missionLoadingMore" @click="loadMoreMissions">
-                        {{ missionLoadingMore ? "불러오는 중..." : `더 보기 (${missions.length}/${missionTotal})` }}
+                        {{ missionLoadingMore ? "Loading..." : `Load more (${missions.length}/${missionTotal})` }}
                       </button>
                     </div>
                   </div>
@@ -6406,7 +6423,7 @@ onUnmounted(() => {
                     </div>
                     <div class="replay-controls-touch">
                       <button class="btn btn-primary btn-lg-touch replay-play" @click="togglePlay" :disabled="missionSamples.length === 0">
-                        {{ replayPlaying ? '⏸ 일시정지' : '▶ 재생' }}
+                        {{ replayPlaying ? '⏸ Pause' : '▶ Play' }}
                       </button>
                       <input
                         type="range" class="replay-slider"
@@ -6415,7 +6432,7 @@ onUnmounted(() => {
                         :disabled="missionSamples.length === 0"
                       />
                       <select v-model.number="replaySpeed" class="replay-speed">
-                        <option :value="1">1× 실시간</option>
+                        <option :value="1">1× real time</option>
                         <option :value="4">4×</option>
                         <option :value="16">16×</option>
                         <option :value="64">64×</option>
@@ -6428,17 +6445,17 @@ onUnmounted(() => {
                 <template v-else>
                   <div class="rover-controls rover-controls-grid">
                     <button class="btn btn-primary btn-lg-touch" :disabled="logFetching" @click="requestLogs">
-                      {{ logFetching ? '가져오는 중...' : '로버에서 가져오기' }}
+                      {{ logFetching ? 'Fetching...' : 'Fetch from rover' }}
                     </button>
-                    <button class="btn btn-ghost btn-lg-touch" @click="refreshLogs">↻ 새로고침</button>
-                    <button class="btn btn-ghost btn-lg-touch" :disabled="logEntries.length === 0" @click="downloadLogs">↓ 다운로드</button>
-                    <button class="btn btn-ghost btn-lg-touch" :disabled="logEntries.length === 0" @click="showLogs = true">전체 보기</button>
+                    <button class="btn btn-ghost btn-lg-touch" @click="refreshLogs">↻ Refresh</button>
+                    <button class="btn btn-ghost btn-lg-touch" :disabled="logEntries.length === 0" @click="downloadLogs">↓ Download</button>
+                    <button class="btn btn-ghost btn-lg-touch" :disabled="logEntries.length === 0" @click="showLogs = true">View all</button>
                   </div>
                   <div class="logs-meta">
-                    {{ logEntries.length }}줄
+                    {{ logEntries.length }} lines
                     <template v-if="logUploadedAt">· {{ formatSnapshotTime(logUploadedAt) }}</template>
                   </div>
-                  <div v-if="logEntries.length === 0" class="empty-msg">업로드된 로그가 없습니다.</div>
+                  <div v-if="logEntries.length === 0" class="empty-msg">No uploaded logs.</div>
                   <div v-else class="logs-view logs-view-inline">
                     <div
                       v-for="(e, i) in logsNewestFirstTrimmed" :key="i"
@@ -6456,7 +6473,7 @@ onUnmounted(() => {
               <section v-show="activeTab === 'gps'" class="tab-pane">
                 <!-- Receiver status — DEVICE + GPS rows in one popover-style grid -->
                 <div class="inspector-group">
-                  <div class="group-title">GPS 수신기</div>
+                  <div class="group-title">GPS unit</div>
                   <div class="gps-detail">
                     <span class="popover-row" v-for="r in receiverGpsRows" :key="r[0]"><span class="popover-key">{{ r[0] }}</span><span :class="['popover-val', r[2] && `popover-val-${r[2]}`]">{{ r[1] }}</span></span>
                   </div>
@@ -6465,35 +6482,35 @@ onUnmounted(() => {
                     :class="followReceiver ? 'btn-primary' : 'btn-ghost'"
                     :disabled="!receiverCanTrack"
                     @click="toggleFollowReceiver"
-                  >수신기 추적</button>
+                  >Follow GPS unit</button>
                 </div>
 
                 <!-- NTRIP source selection -->
                 <div class="inspector-group">
-                  <div class="group-title">로버 NTRIP 보정 소스</div>
+                  <div class="group-title">Rover NTRIP correction source</div>
                   <div v-if="baseNoReceiver" class="gps-alert">
-                    ⚠️ GPS 수신기가 연결되지 않았습니다. 수신기를 연결하거나 NGII로 전환하세요.
+                    ⚠️ The GPS unit is not connected. Connect it or switch to NGII.
                   </div>
                   <div class="gps-source-choices">
                     <label :class="['gps-source-opt', { active: gpsConfig.ntrip_source === 'ngii' }]">
                       <input type="radio" :checked="gpsConfig.ntrip_source === 'ngii'"
                              :disabled="gpsSaving" @change="setNtripSource('ngii')" />
                       <div>
-                        <strong>NGII (국토지리정보원)</strong>
-                        <div class="gps-sub">NTRIP 캐스터에서 최근접 기준국 자동 선택</div>
+                        <strong>NGII (National Geographic Information Institute)</strong>
+                        <div class="gps-sub">Selects the nearest base station from the NTRIP caster automatically</div>
                       </div>
                     </label>
                     <label :class="['gps-source-opt', { active: gpsConfig.ntrip_source === 'base', disabled: !hasSurveyedPoint }]">
                       <input type="radio" :checked="gpsConfig.ntrip_source === 'base'"
                              :disabled="gpsSaving || !hasSurveyedPoint" @change="setNtripSource('base', selectedBasePointId)" />
                       <div>
-                        <strong>RTK 수신기</strong>
-                        <div class="gps-sub">측량점에 배치한 수신기를 고정 기준국으로 사용</div>
+                        <strong>RTK GPS unit</strong>
+                        <div class="gps-sub">Uses the GPS unit placed on a survey point as a fixed base station</div>
                       </div>
                     </label>
                   </div>
                   <div v-if="gpsConfig.ntrip_source === 'base'" class="gps-base-select">
-                    <label>기준점</label>
+                    <label>Base point</label>
                     <select v-model.number="selectedBasePointId" :disabled="gpsSaving"
                             @change="setNtripSource('base', selectedBasePointId)">
                       <option v-for="p in surveyedPoints" :key="p.id" :value="p.id">{{ p.name }}</option>
@@ -6503,13 +6520,13 @@ onUnmounted(() => {
 
                 <!-- Survey points -->
                 <div class="inspector-group">
-                  <div class="group-title">측량점 (기준국 위치)</div>
+                  <div class="group-title">Survey points (base station positions)</div>
                   <div class="gps-add-row">
-                    <input v-model="newSurveyName" type="text" placeholder="측량점 이름"
+                    <input v-model="newSurveyName" type="text" placeholder="Survey point name"
                            maxlength="100" @keyup.enter="addSurveyPoint" />
-                    <button class="btn btn-primary btn-sm" :disabled="!newSurveyName.trim()" @click="addSurveyPoint">추가</button>
+                    <button class="btn btn-primary btn-sm" :disabled="!newSurveyName.trim()" @click="addSurveyPoint">Add</button>
                   </div>
-                  <div v-if="surveyPoints.length === 0" class="empty-msg">측량점이 없습니다.</div>
+                  <div v-if="surveyPoints.length === 0" class="empty-msg">No survey points.</div>
                   <div v-else class="gps-point-list">
                     <div v-for="p in surveyPoints" :key="p.id"
                          :data-survey-id="p.id"
@@ -6518,13 +6535,13 @@ onUnmounted(() => {
                            clickable: p.lat != null && p.lng != null,
                            selected: selectedSurveyPointId === p.id,
                          }]"
-                         :title="p.lat != null && p.lng != null ? '지도에서 이 측량점으로 이동' : ''"
+                         :title="p.lat != null && p.lng != null ? 'Show this survey point on the map' : ''"
                          @click="panToSurveyPoint(p)">
                       <div class="gps-point-head">
                         <strong class="gps-point-name">{{ p.name }}</strong>
-                        <span v-if="gpsConfig.ntrip_source === 'base' && gpsConfig.active_base_point_id === p.id" class="gps-tag gps-tag-base">기준국</span>
-                        <span v-else-if="p.lat == null" class="gps-tag gps-tag-warn">미측량</span>
-                        <span v-else class="gps-tag gps-tag-ok">측량점</span>
+                        <span v-if="gpsConfig.ntrip_source === 'base' && gpsConfig.active_base_point_id === p.id" class="gps-tag gps-tag-base">Base station</span>
+                        <span v-else-if="p.lat == null" class="gps-tag gps-tag-warn">Not surveyed</span>
+                        <span v-else class="gps-tag gps-tag-ok">Surveyed</span>
                       </div>
                       <div v-if="p.lat != null && p.lng != null" class="gps-point-coord">
                         <span class="gps-point-latlng">{{ formatLatLng(p.lat, p.lng) }}<template v-if="p.alt != null"> · {{ formatAlt(p.alt) }} m</template></span>
@@ -6537,23 +6554,23 @@ onUnmounted(() => {
                       <template v-if="surveyingPointId === p.id">
                         <div class="gps-survey-live">
                           <div class="gps-survey-meta">
-                            <span class="gps-surveying">측량 중</span>
-                            <span v-if="surveyProgress" class="gps-sub">{{ surveyProgress.samples }}개 수집 · {{ surveyProgress.remaining }}s 남음</span>
+                            <span class="gps-surveying">Surveying</span>
+                            <span v-if="surveyProgress" class="gps-sub">{{ surveyProgress.samples }} collected · {{ surveyProgress.remaining }}s left</span>
                           </div>
                           <div class="gps-progress"><div class="gps-progress-bar" :style="{ width: (surveyProgress ? surveyProgress.pct : 0) + '%' }"></div></div>
                         </div>
                         <div class="gps-point-actions">
-                          <button class="btn btn-ghost btn-sm gps-btn-danger" @click.stop="cancelSurvey(p)">측량 취소</button>
+                          <button class="btn btn-ghost btn-sm gps-btn-danger" @click.stop="cancelSurvey(p)">Cancel survey</button>
                         </div>
                       </template>
                       <!-- Idle: survey / delete actions -->
                       <div v-else class="gps-point-actions">
                         <button class="btn btn-ghost btn-sm"
                                 :disabled="!receiverConnected || baseState !== 'idle'"
-                                @click.stop="startSurvey(p)">{{ p.lat != null ? '재측량' : '측량' }}</button>
+                                @click.stop="startSurvey(p)">{{ p.lat != null ? 'Resurvey' : 'Survey' }}</button>
                         <button class="btn btn-ghost btn-sm gps-btn-danger"
                                 :disabled="gpsConfig.ntrip_source === 'base' && gpsConfig.active_base_point_id === p.id"
-                                @click.stop="deleteSurveyPoint(p)">삭제</button>
+                                @click.stop="deleteSurveyPoint(p)">Delete</button>
                       </div>
                     </div>
                   </div>
@@ -6678,7 +6695,7 @@ onUnmounted(() => {
 .popover-val-bad { color: #ef4444; }
 .popover-val-neutral { color: var(--text-secondary); }
 
-/* Popover action row (e.g. battery 보정 button) — span both grid columns
+/* Popover action row (e.g. "Calibrate voltage" button) — span both grid columns
    and switch back to flex so the button can right-align inside the box. */
 .popover-row.popover-actions {
   display: flex;

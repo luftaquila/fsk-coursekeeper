@@ -1,0 +1,32 @@
+{
+  "name": "fsk-coursekeeper",
+  "version": "0.1.0",
+  "description": "Course data service, REST routes, and operator console shared by every Coursekeeper host",
+  "type": "module",
+  "author": "LUFT-AQUILA",
+  "license": "Beerware",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/luftaquila/fsk-coursekeeper.git",
+    "directory": "course"
+  },
+  "exports": {
+    "./service": "./service/index.mjs",
+    "./service/*": "./service/*",
+    "./console/*": "./console/*",
+    "./*": "./*"
+  },
+  "peerDependencies": {
+    "leaflet": "^1.9.4",
+    "vue": "^3.5.26"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "leaflet-rotate": "^0.2.8",
+    "vue-sonner": "^2.0.9"
+  },
+  "devDependencies": {
+    "leaflet": "^1.9.4",
+    "vue": "^3.5.26"
+  }
+}

@@ -1,11 +1,11 @@
 import JSZip from "jszip";
 import { courseDirectionOptions } from "../lib/course-display.mjs";
-import { buildRoadEdges } from "../../../lib/road-edges.mjs";
-import { buildTrackModel } from "../../../lib/track-build.mjs";
-import { buildGuidedTrackModel } from "../../../lib/guided-track-build.mjs";
-import { resolveCourseRoute, ROUTE_MODE } from "../../../lib/route-mode.mjs";
-import { packTrackEntries, safeTrackName } from "../../../lib/pack-track.mjs";
-import { buildEnrichedJSON, buildGuidedEnrichedJSON } from "../../../lib/course-export.mjs";
+import { buildRoadEdges } from "../../road-edges.mjs";
+import { buildTrackModel } from "../../track-build.mjs";
+import { buildGuidedTrackModel } from "../../guided-track-build.mjs";
+import { resolveCourseRoute, ROUTE_MODE } from "../../route-mode.mjs";
+import { packTrackEntries, safeTrackName } from "../../pack-track.mjs";
+import { buildEnrichedJSON, buildGuidedEnrichedJSON } from "../../course-export.mjs";
 import { renderTwoPanelPNG } from "./panel-canvas.js";
 
 const EXPORT_DATE = new Date("2020-01-01T00:00:00Z");
@@ -36,7 +36,7 @@ export async function buildCourseArchive({ course, cones, route = { markers: [],
     step: 1.0, metric: true, fallback: courseDirectionOptions(course, cones),
   });
   const cl = resolved.centerline;
-  if (!cl.ok) throw new Error(`중심선 생성 실패: ${cl.reason}`);
+  if (!cl.ok) throw new Error(`Centerline generation failed: ${cl.reason}`);
   const guided = resolved.mode === ROUTE_MODE.GUIDED;
   const edges = guided ? null : buildRoadEdges(cl);
   const track = guided ? buildGuidedTrackModel(cl, cones, { name: safeName }) : buildTrackModel(cl, edges, { name: safeName });

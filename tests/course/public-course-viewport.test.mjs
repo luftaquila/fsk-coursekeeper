@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPublicCourseViewport } from "../../course/web/src/lib/public-course-viewport.mjs";
+import { createPublicCourseViewport } from "../../course/console/lib/public-course-viewport.mjs";
 
 function fixture(t) {
   let resize;

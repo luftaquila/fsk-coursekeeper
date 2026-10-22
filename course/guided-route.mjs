@@ -84,10 +84,10 @@ function buildGraph(cones, frame) {
   const centers = cones.filter((c) => c.side === "center").map(frame.point);
   const left = walls.filter((c) => c.side === "left").map(frame.point);
   const right = walls.filter((c) => c.side === "right").map(frame.point);
-  if (left.length < 3 || right.length < 3) throw new Error("주행 경로에는 왼쪽·오른쪽 콘이 각각 3개 이상 필요합니다.");
+  if (left.length < 3 || right.length < 3) throw new Error("A guided route needs at least 3 left and 3 right cones.");
   const widths = left.map((p) => nearestDist(p, right)).sort((a, b) => a - b);
   const width = widths[Math.floor(widths.length / 2)];
-  if (!(width > 0)) throw new Error("콘 배치에서 유효한 코스 폭을 계산할 수 없습니다.");
+  if (!(width > 0)) throw new Error("Could not compute a valid course width from the cone layout.");
 
   const points = walls.map(frame.point);
   const side = walls.map((c) => c.side);
@@ -177,7 +177,7 @@ function buildGraph(cones, frame) {
     delete node.rightAltitudes;
     delete node.sections;
   }
-  if (!nodes.length || !edgeMap.size) throw new Error("콘 사이에서 연결된 주행 통로를 찾을 수 없습니다.");
+  if (!nodes.length || !edgeMap.size) throw new Error("Could not find a connected driving corridor between the cones.");
   return { nodes, edges: [...edgeMap.values()], adjacency, width };
 }
 
@@ -362,7 +362,7 @@ function snapMarker(marker, graph, frame, terminal = false) {
     }
   }
   if (!best || best.distance > Math.max(5, graph.width * 2.5)) {
-    throw new Error(`주행 마커 "${marker.label || marker.id}"가 콘 통로에서 너무 멉니다 (${best?.distance.toFixed(1) || "?"} m).`);
+    throw new Error(`Route marker "${marker.label || marker.id}" is too far from the cone corridor (${best?.distance.toFixed(1) || "?"} m).`);
   }
   return best.node;
 }
@@ -416,8 +416,8 @@ function bridgeMarkerComponents(graph, snapped) {
     if (!candidates.length || candidates[0].length > maxGap) candidates = candidatesFor(2);
     const best = candidates[0];
     if (!best || best.length > maxGap) {
-      const gap = best ? ` (가장 가까운 간격 ${best.length.toFixed(1)} m, 허용 ${maxGap.toFixed(1)} m)` : "";
-      throw new Error(`${visit}→${visit + 1}단계의 콘 통로가 분리되어 있습니다${gap}. 허리·분기점 가까이에 중간 마커를 추가하거나 콘 개구부를 확인하세요.`);
+      const gap = best ? ` (closest gap ${best.length.toFixed(1)} m, allowed ${maxGap.toFixed(1)} m)` : "";
+      throw new Error(`The cone corridor between steps ${visit} and ${visit + 1} is disconnected${gap}. Add an intermediate marker near the waist or junction, or check the cone opening.`);
     }
     const bridges = [best];
     // Two open arcs meeting at a skidpad waist need both sides joined, otherwise
@@ -439,7 +439,7 @@ function bridgeMarkerComponents(graph, snapped) {
 // Direction-aware shortest path. State includes the previous node so the first
 // move of a new marker leg cannot immediately reverse the last completed leg.
 function shortestPath(graph, start, target, previous) {
-  if (start === target) throw new Error("연속한 주행 단계가 같은 그래프 지점입니다. 원 둘레에 중간 마커를 추가하세요.");
+  if (start === target) throw new Error("Consecutive route steps resolve to the same graph point. Add an intermediate marker along the circle.");
   const states = new Map();
   const done = new Set();
   const queue = [];
@@ -481,7 +481,7 @@ function shortestPath(graph, start, target, previous) {
       });
     }
   }
-  if (!finish) throw new Error("주행 마커 사이의 연속 경로를 찾지 못했습니다. 진행 방향을 나타내는 중간 마커를 추가하세요.");
+  if (!finish) throw new Error("Could not find a continuous path between the route markers. Add an intermediate marker that shows the travel direction.");
   const nodes = [], edges = [];
   for (let s = finish; s; s = s.parent) {
     nodes.push(s.cur);
@@ -543,14 +543,14 @@ function smoothRoute(points, passes = 4) {
  * @param {{step?:number}} opts
  */
 export function computeGuidedRoute(cones, markers, steps, opts = {}) {
-  if (!Array.isArray(cones) || cones.length < 6) throw new Error("주행 경로를 만들 콘이 부족합니다.");
+  if (!Array.isArray(cones) || cones.length < 6) throw new Error("Not enough cones to build a guided route.");
   if (!Array.isArray(markers) || !Array.isArray(steps) || steps.length < 2) {
-    throw new Error("주행 순서에는 시작과 종료를 포함해 2개 이상의 단계가 필요합니다.");
+    throw new Error("A route order needs at least 2 steps, including start and finish.");
   }
   const byId = new Map(markers.map((m) => [m.id, m]));
   const ordered = steps.map((id) => {
     const marker = byId.get(id);
-    if (!marker) throw new Error(`주행 순서가 존재하지 않는 마커 #${id}를 참조합니다.`);
+    if (!marker) throw new Error(`The route order references marker #${id}, which does not exist.`);
     return marker;
   });
   const frame = project(cones);
@@ -571,7 +571,7 @@ export function computeGuidedRoute(cones, markers, steps, opts = {}) {
   const graph = sideGraph;
   if (openGuidedRoute && collapsedToSingleLoop && terminalOutsideLoop &&
       !augmentAxisCorridor(graph, cones, frame, ordered[0], ordered[ordered.length - 1])) {
-    throw new Error("진입·진출 마커 축에서 연속된 중앙 통로를 찾지 못했습니다. 양쪽 팔 끝에 마커를 두고 중앙 통로의 콘 쌍을 확인하세요.");
+    throw new Error("Could not find a continuous center corridor along the entry and exit marker axis. Place markers at both arm ends and check the center corridor cone pairs.");
   }
   // Only now is the graph complete: the arms augmentAxisCorridor just added are
   // where the worst surveyed altitudes sit, so the grade limit runs last.
@@ -595,7 +595,7 @@ export function computeGuidedRoute(cones, markers, steps, opts = {}) {
     } catch (err) {
       const from = ordered[i - 1].label || ordered[i - 1].id;
       const to = ordered[i].label || ordered[i].id;
-      throw new Error(`${i}→${i + 1}단계 (${from} → ${to}): ${err.message}`);
+      throw new Error(`Steps ${i}→${i + 1} (${from} → ${to}): ${err.message}`);
     }
     edgeIds.push(...leg.edges);
     nodeIds.push(...leg.nodes.slice(1));

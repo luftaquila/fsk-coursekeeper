@@ -4,7 +4,7 @@ import { readFileSync } from "node:fs";
 import { parse } from "vue/compiler-sfc";
 import * as Vue from "vue";
 
-const { descriptor } = parse(readFileSync(new URL("../../course/web/src/views/PublicCourseView.vue", import.meta.url), "utf8"));
+const { descriptor } = parse(readFileSync(new URL("../../course/console/views/PublicCourseView.vue", import.meta.url), "utf8"));
 const render = Vue.compile(descriptor.template.content, { prefixIdentifiers: true });
 
 function fixture() {
@@ -40,7 +40,7 @@ function fixture() {
 test("clicking the space between card actions selects the course", () => {
   const f = fixture();
   try {
-    const download = f.all(f.card).find((node) => node.props?.["aria-label"] === "Asseto Corsa 트랙 다운로드");
+    const download = f.all(f.card).find((node) => node.props?.["aria-label"] === "Download Assetto Corsa track");
     f.click(download.parent);
     assert.equal(f.state.selectedId, 2);
   } finally { f.app.unmount(); }
@@ -49,8 +49,8 @@ test("clicking the space between card actions selects the course", () => {
 test("card action buttons do not select the course", () => {
   const f = fixture();
   try {
-    f.click(f.all(f.card).find((node) => node.props?.["aria-label"] === "Asseto Corsa 트랙 다운로드"));
-    f.click(f.all(f.card).find((node) => node.props?.["aria-label"] === "코스 표시"));
+    f.click(f.all(f.card).find((node) => node.props?.["aria-label"] === "Download Assetto Corsa track"));
+    f.click(f.all(f.card).find((node) => node.props?.["aria-label"] === "Show course"));
     assert.deepEqual(f.downloads, [2]);
     assert.equal(f.state.overlays[2], true);
     assert.equal(f.state.selectedId, 1);

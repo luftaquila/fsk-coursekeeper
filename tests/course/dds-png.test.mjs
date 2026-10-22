@@ -2,8 +2,8 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import zlib from "node:zlib";
 
-import { writeDDS, asphaltDDS, grassDDS } from "../../course/lib/dds.mjs";
-import { encodePNG } from "../../course/lib/png.mjs";
+import { writeDDS, asphaltDDS, grassDDS } from "../../course/dds.mjs";
+import { encodePNG } from "../../course/png.mjs";
 
 const u32le = (buf, off) => buf[off] | (buf[off + 1] << 8) | (buf[off + 2] << 16) | (buf[off + 3] << 24);
 const u32be = (buf, off) => (buf[off] * 0x1000000) + (buf[off + 1] << 16) + (buf[off + 2] << 8) + buf[off + 3];

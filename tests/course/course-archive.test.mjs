@@ -2,10 +2,10 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { buildCourseArchive } from "../../course/web/src/export/course-archive.mjs";
-import { encodePNG } from "../../course/lib/png.mjs";
+import { buildCourseArchive } from "../../course/console/export/course-archive.mjs";
+import { encodePNG } from "../../course/png.mjs";
 import { measuredSkidpadFixture } from "./fixtures/measured-skidpad.mjs";
-const requireWeb = createRequire(new URL("../../course/web/package.json", import.meta.url));
+const requireWeb = createRequire(new URL("../../course/package.json", import.meta.url));
 const JSZip = requireWeb("jszip");
 const course = { id: 1, name: "Race course", reverse: 0, start_cone_id: null };
 const memos = [{ lat: 35.29, lng: 126.57, width: 5, height: 3, rotation: 0, content: "PRIVATE_NOTE_SENTINEL" }];
@@ -68,5 +68,5 @@ test("guided public exports preserve repeat visits and exclude memos in the enri
 });
 
 test("an invalid course rejects export before producing an incomplete archive", async () => {
-  await assert.rejects(buildCourseArchive({ course, cones: [] }, { renderPreview: preview }), /중심선|콘|cone/i);
+  await assert.rejects(buildCourseArchive({ course, cones: [] }, { renderPreview: preview }), /centerline|cone/i);
 });

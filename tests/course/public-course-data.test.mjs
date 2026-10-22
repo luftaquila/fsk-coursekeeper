@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPublicCourseData } from "../../course/web/src/lib/public-course-data.mjs";
+import { createPublicCourseData } from "../../course/console/lib/public-course-data.mjs";
 
 function deferred() {
   let resolve;
@@ -91,7 +91,7 @@ test("an archive still being generated is discarded when the view is disposed", 
   await data.refresh();
   const started = deferred(), archive = deferred();
   const download = data.exportCourse(1, () => { started.resolve(); return archive.promise; });
-  const rejected = assert.rejects(download, /코스가 변경/);
+  const rejected = assert.rejects(download, /course has changed/);
   await started.promise;
   data.dispose();
   archive.resolve("stale archive");

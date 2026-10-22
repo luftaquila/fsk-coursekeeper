@@ -16,8 +16,8 @@ import {
   optimizeConeRoute,
   renderMissionMapBearing,
   unavailableMissionRouteItems,
-} from "../../course/web/src/lib/mission-route.mjs";
-import { buildSideRanks } from "../../course/lib/cone-index.mjs";
+} from "../../course/console/lib/mission-route.mjs";
+import { buildSideRanks } from "../../course/cone-index.mjs";
 
 const cones = [
   { id: 1, side: "left", lat: 35.0, lng: 126.0 },
@@ -33,11 +33,11 @@ test("filters hundreds-friendly cone fields by side and query", () => {
 test("gives map and lists the same stable side-relative cone names", () => {
   const unsorted = [cones[2], cones[1], cones[0]];
   const ranks = buildSideRanks(unsorted);
-  assert.equal(missionConeDisplayName(cones[0], ranks), "왼쪽 #1");
-  assert.equal(missionConeDisplayName(cones[2], ranks), "왼쪽 #2");
-  assert.equal(missionConeDisplayName(cones[1], ranks), "오른쪽 #1");
+  assert.equal(missionConeDisplayName(cones[0], ranks), "Left #1");
+  assert.equal(missionConeDisplayName(cones[2], ranks), "Left #2");
+  assert.equal(missionConeDisplayName(cones[1], ranks), "Right #1");
   assert.equal(missionConeShortName(cones[2], ranks), "L-2");
-  assert.equal(missionConeDisplayName(null, ranks), "알 수 없는 콘");
+  assert.equal(missionConeDisplayName(null, ranks), "Unknown cone");
 });
 
 test("groups repeated map visits without hiding a moved cone snapshot", () => {

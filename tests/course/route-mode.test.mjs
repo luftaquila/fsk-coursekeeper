@@ -4,8 +4,8 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 
-import { computeCenterline } from "../../course/lib/centerline.mjs";
-import { resolveCourseRoute, seedOrientationMarkers, ROUTE_MODE } from "../../course/lib/route-mode.mjs";
+import { computeCenterline } from "../../course/centerline.mjs";
+import { resolveCourseRoute, seedOrientationMarkers, ROUTE_MODE } from "../../course/route-mode.mjs";
 import { measuredSkidpadFixture } from "./fixtures/measured-skidpad.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -114,7 +114,7 @@ describe("resolveCourseRoute — orientation from hand-placed markers", () => {
     // first hop established, so no single lap visits them in this order. That
     // leaves the router, which reports it cannot join them on this cone field.
     const zigzag = withIds([at(0), at(1 / 3), at(1 / 6)]);
-    assert.throws(() => resolveCourseRoute(cones, zigzag, zigzag.map((m) => m.id), { step: 1 }), /마커/);
+    assert.throws(() => resolveCourseRoute(cones, zigzag, zigzag.map((m) => m.id), { step: 1 }), /marker/);
   });
 
   it("closing back onto the opening marker still counts as one sweep", () => {
@@ -141,7 +141,7 @@ describe("resolveCourseRoute — falls through to the graph router", () => {
     const steps = [markers[0].id, markers[1].id, markers[0].id, markers[1].id];
     assert.throws(
       () => resolveCourseRoute(cones, markers, steps, { step: 1 }),
-      /마커/,
+      /marker/,
       "the guided router's own diagnostic must reach the caller",
     );
   });

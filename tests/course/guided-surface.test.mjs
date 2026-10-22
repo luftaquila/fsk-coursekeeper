@@ -1,8 +1,8 @@
 import { describe, it, before } from "node:test";
 import assert from "node:assert/strict";
 
-import { computeGuidedRoute } from "../../course/lib/guided-route.mjs";
-import { buildGuidedTrackModel } from "../../course/lib/guided-track-build.mjs";
+import { computeGuidedRoute } from "../../course/guided-route.mjs";
+import { buildGuidedTrackModel } from "../../course/guided-track-build.mjs";
 import { measuredSkidpadFixture } from "./fixtures/measured-skidpad.mjs";
 
 // The signed corridor field the road surface is contoured against: positive on

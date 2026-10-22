@@ -1,12 +1,11 @@
 import { ref } from "vue";
-import { request } from "../api.js";
 
 // Course cone-set snapshots (create / list / restore / delete), extracted from
 // MapView. Restore relies on the server's `cones` SSE broadcast to refresh the
 // map, so this only orchestrates the API + modal state. Deps:
 //   activeCourseId  the course whose snapshots we manage (ref)
 //   notifyError     toast on failure
-export function useCourseSnapshots({ activeCourseId, notifyError }) {
+export function useCourseSnapshots({ request, activeCourseId, notifyError }) {
   const showSnapshots = ref(false);
   const snapshotList = ref([]);
   const snapshotReason = ref("");
@@ -41,7 +40,7 @@ export function useCourseSnapshots({ activeCourseId, notifyError }) {
 
   async function restoreSnapshot(sid) {
     if (!activeCourseId.value) return;
-    if (!confirm("현재 콘을 모두 지우고 이 스냅샷 상태로 되돌립니다. 계속하시겠습니까?\n(되돌리기 직전 상태가 자동으로 스냅샷됩니다.)")) return;
+    if (!confirm("This clears all current cones and restores this snapshot. Continue?\n(The current state is snapshotted automatically before restoring.)")) return;
     try {
       await request(`/api/courses/${activeCourseId.value}/snapshots/${sid}/restore`, { method: "POST" });
       await loadSnapshots();
@@ -51,7 +50,7 @@ export function useCourseSnapshots({ activeCourseId, notifyError }) {
 
   async function deleteSnapshot(sid) {
     if (!activeCourseId.value) return;
-    if (!confirm("이 스냅샷을 삭제합니다. 계속하시겠습니까?")) return;
+    if (!confirm("Delete this snapshot?")) return;
     try {
       await request(`/api/courses/${activeCourseId.value}/snapshots/${sid}`, { method: "DELETE" });
       await loadSnapshots();

@@ -3,15 +3,15 @@ import { computed, onMounted, onUnmounted, reactive, ref, watch } from "vue";
 import L from "leaflet";
 import CourseMapIcon from "../components/CourseMapIcon.vue";
 import { readPublicCoursePreferences, savePublicCoursePreference, normalizeMapBearing, renderMapBearing } from "../lib/course-view-preferences.mjs";
-import { useNotification } from "@shared/browser/useNotification.js";
-import { buildSideRanks } from "@lib/cone-index.mjs";
+import { useNotification } from "../notify.mjs";
+import { buildSideRanks } from "../../cone-index.mjs";
 import { createCourseBaseMap, courseCenterlineLayer } from "../lib/course-map.mjs";
 import { courseDisplayState } from "../lib/course-display.mjs";
 import { LabeledConeCanvas, SIDE_COLORS } from "../lib/cone-render.mjs";
 import { createPublicCourseGeometry } from "../lib/public-course-geometry.mjs";
 import { createPublicCourseData } from "../lib/public-course-data.mjs";
 import { createPublicCourseViewport } from "../lib/public-course-viewport.mjs";
-import { requestPublicCourse } from "../public-api.js";
+import { useHost } from "../host.mjs";
 import { useMeasureTools } from "../composables/useMeasureTools.js";
 
 const { error: notifyError } = useNotification();
@@ -28,12 +28,12 @@ let courseLayers = null;
 let viewport = null;
 let unmounted = false;
 const state = reactive({ courses: [], details: {}, selectedId: preferences.selectedId, overlays: preferences.overlays, loading: true, error: "" });
-const data = createPublicCourseData(state, { request: requestPublicCourse });
+const data = createPublicCourseData(state, { request: useHost().publicCourses.request });
 const active = computed(() => state.details[state.selectedId]);
 const geometries = ref({});
 const geometryLoader = createPublicCourseGeometry((id, result) => {
   geometries.value[id] = result;
-}, { onError: () => notifyError("중심선을 계산하지 못했습니다. 페이지를 다시 불러오세요.") });
+}, { onError: () => notifyError("Failed to compute the centerline. Reload the page.") });
 const geometry = computed(() => geometries.value[state.selectedId] || { line: null });
 
 const { toolMode, measureResult, enterToolMode, exitToolMode, resetMeasure, handleMeasureClick } = useMeasureTools({
@@ -88,7 +88,7 @@ async function download(id) {
     const { buildCourseArchive, downloadCourseArchive } = await import("../export/course-archive.mjs");
     const archive = await data.exportCourse(id, buildCourseArchive);
     downloadCourseArchive(archive);
-  } catch (error) { if (!unmounted) notifyError(error.message || "다운로드에 실패했습니다."); }
+  } catch (error) { if (!unmounted) notifyError(error.message || "Download failed."); }
   finally { exportingId.value = null; }
 }
 
@@ -128,7 +128,7 @@ onMounted(async () => {
     renderer = new LabeledConeCanvas({ padding: 0.5 });
     map.on("click", measureAt);
     await data.refresh();
-  } catch (error) { state.loading = false; state.error = error.message || "지도를 불러오지 못했습니다."; }
+  } catch (error) { state.loading = false; state.error = error.message || "Failed to load the map."; }
 });
 onUnmounted(() => {
   unmounted = true;
@@ -144,40 +144,40 @@ onUnmounted(() => {
   <div class="public-course">
     <div class="public-body">
       <div class="public-map-wrap">
-        <div ref="mapElement" class="public-map" aria-label="경기 코스 지도"></div>
-        <div v-if="active" class="map-fab-panel map-fab-tools" role="group" aria-label="코스 도구">
-          <button :class="['fab-icon-btn', 'fab-tool', { active: showCenterline }]" aria-label="중심선 표시" title="중심선" :aria-pressed="showCenterline" @click="showCenterline = !showCenterline"><CourseMapIcon name="centerline" /></button>
-          <button :class="['fab-icon-btn', 'fab-tool', { active: toolMode === 'ruler' }]" aria-label="거리 측정" title="자" :aria-pressed="toolMode === 'ruler'" @click="enterToolMode('ruler')"><CourseMapIcon name="ruler" /></button>
-          <button :class="['fab-icon-btn', 'fab-tool', { active: toolMode === 'protractor' }]" aria-label="각도 측정" title="각도기" :aria-pressed="toolMode === 'protractor'" @click="enterToolMode('protractor')"><CourseMapIcon name="protractor" /></button>
-          <button class="fab-icon-btn" aria-label="지도 90° 회전" title="지도 90° 회전" @click="rotateMap"><CourseMapIcon name="rotate" /></button>
+        <div ref="mapElement" class="public-map" aria-label="Course map"></div>
+        <div v-if="active" class="map-fab-panel map-fab-tools" role="group" aria-label="Course tools">
+          <button :class="['fab-icon-btn', 'fab-tool', { active: showCenterline }]" aria-label="Show centerline" title="Centerline" :aria-pressed="showCenterline" @click="showCenterline = !showCenterline"><CourseMapIcon name="centerline" /></button>
+          <button :class="['fab-icon-btn', 'fab-tool', { active: toolMode === 'ruler' }]" aria-label="Measure distance" title="Ruler" :aria-pressed="toolMode === 'ruler'" @click="enterToolMode('ruler')"><CourseMapIcon name="ruler" /></button>
+          <button :class="['fab-icon-btn', 'fab-tool', { active: toolMode === 'protractor' }]" aria-label="Measure angle" title="Protractor" :aria-pressed="toolMode === 'protractor'" @click="enterToolMode('protractor')"><CourseMapIcon name="protractor" /></button>
+          <button class="fab-icon-btn" aria-label="Rotate map 90°" title="Rotate map 90°" @click="rotateMap"><CourseMapIcon name="rotate" /></button>
         </div>
         <div v-if="toolMode !== 'none' && active" class="public-measure" role="status">
           <strong v-if="measureResult">{{ measureResult }}</strong>
-          <button class="fab-icon-btn" aria-label="측정 초기화" title="초기화" @click="resetMeasure"><CourseMapIcon name="reset" /></button>
-          <button class="fab-icon-btn" aria-label="측정 닫기" title="닫기" @click="exitToolMode"><CourseMapIcon name="close" /></button>
+          <button class="fab-icon-btn" aria-label="Reset measurement" title="Reset" @click="resetMeasure"><CourseMapIcon name="reset" /></button>
+          <button class="fab-icon-btn" aria-label="Close measurement" title="Close" @click="exitToolMode"><CourseMapIcon name="close" /></button>
         </div>
       </div>
-      <aside class="public-inspector" aria-label="공개 코스">
+      <aside class="public-inspector" aria-label="Public courses">
         <div class="public-list-heading">
-          <h2>코스 목록</h2>
+          <h2>Courses</h2>
         </div>
-        <p v-if="state.loading" role="status">코스를 불러오는 중…</p>
+        <p v-if="state.loading" role="status">Loading courses…</p>
         <div v-else-if="state.error" role="alert">
           <p>{{ state.error }}</p>
-          <button class="btn btn-ghost" @click="data.refresh">다시 불러오기</button>
+          <button class="btn btn-ghost" @click="data.refresh">Reload</button>
         </div>
-        <p v-else-if="!state.courses.length">공개된 코스가 없습니다.</p>
+        <p v-else-if="!state.courses.length">No published courses.</p>
         <ul class="public-course-list">
           <li v-for="course in state.courses" :key="course.id" class="public-course-item" :class="{ selected: state.selectedId === course.id }" @click="state.selectedId = course.id">
             <button class="btn public-select" :title="course.name" :aria-pressed="state.selectedId === course.id" @click="state.selectedId = course.id">
               <span class="public-course-name">{{ course.name }}</span> <span class="public-course-length" v-if="geometries[course.id]?.line">({{ Math.round(geometries[course.id].line.length) }}m)</span>
             </button>
             <div class="public-course-actions">
-              <button class="fab-icon-btn public-download" aria-label="Asseto Corsa 트랙 다운로드" title="다운로드" :aria-busy="exportingId === course.id" :disabled="state.loading || !state.details[course.id] || exportingId != null" @click.stop="download(course.id)">
+              <button class="fab-icon-btn public-download" aria-label="Download Assetto Corsa track" title="Download" :aria-busy="exportingId === course.id" :disabled="state.loading || !state.details[course.id] || exportingId != null" @click.stop="download(course.id)">
                 <CourseMapIcon name="download" />
-                <span>Asseto Corsa 트랙</span>
+                <span>Assetto Corsa track</span>
               </button>
-              <button class="fab-icon-btn" aria-label="코스 표시" title="코스 표시" :disabled="state.selectedId === course.id" :aria-pressed="state.selectedId === course.id || state.overlays[course.id] === true" @click.stop="toggleOverlay(course.id)">
+              <button class="fab-icon-btn" aria-label="Show course" title="Show course" :disabled="state.selectedId === course.id" :aria-pressed="state.selectedId === course.id || state.overlays[course.id] === true" @click.stop="toggleOverlay(course.id)">
                 <CourseMapIcon :name="state.selectedId === course.id || state.overlays[course.id] === true ? 'eye' : 'eye-off'" />
               </button>
             </div>

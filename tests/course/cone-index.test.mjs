@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { buildSideRanks } from "../../course/lib/cone-index.mjs";
+import { buildSideRanks } from "../../course/cone-index.mjs";
 
 // The exact per-cone implementation buildSideRanks replaces (see MapView.vue
 // history): rank = count of same-side cones with id <= this cone's id.

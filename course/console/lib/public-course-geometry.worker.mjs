@@ -1,4 +1,4 @@
-import { resolveCourseRoute } from "../../../lib/route-mode.mjs";
+import { resolveCourseRoute } from "../../route-mode.mjs";
 import { courseDirectionOptions } from "./course-display.mjs";
 
 export function publicCourseGeometry({ course, cones, route }) {

@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { computeGuidedRoute } from "../../course/lib/guided-route.mjs";
-import { buildGuidedTrackModel } from "../../course/lib/guided-track-build.mjs";
-import { packTrackEntries } from "../../course/lib/pack-track.mjs";
-import { buildGuidedEnrichedJSON } from "../../course/lib/course-export.mjs";
-import { readFastLane } from "../../course/lib/ai-line.mjs";
-import { readKn5 } from "../../course/lib/kn5.mjs";
+import { computeGuidedRoute } from "../../course/guided-route.mjs";
+import { buildGuidedTrackModel } from "../../course/guided-track-build.mjs";
+import { packTrackEntries } from "../../course/pack-track.mjs";
+import { buildGuidedEnrichedJSON } from "../../course/course-export.mjs";
+import { readFastLane } from "../../course/ai-line.mjs";
+import { readKn5 } from "../../course/kn5.mjs";
 import { measuredSkidpadFixture } from "./fixtures/measured-skidpad.mjs";
 
 const LAT0 = 35.292;
@@ -169,7 +169,7 @@ describe("marker-guided skidpad route", () => {
     const duplicate = { id: 99, ...markers[0], lat: markers[0].lat + 0.1 / MLAT };
     assert.throws(
       () => computeGuidedRoute(cones, [...markers, duplicate], [markers[0].id, duplicate.id]),
-      /같은 그래프 지점/,
+      /same graph point/,
     );
   });
 

@@ -56,7 +56,7 @@ import {
   trackManualControlRequest,
   uncertainMissionOccurrenceIds,
   waitForManualControlDrain,
-} from "../../course/web/src/lib/mission-session.mjs";
+} from "../../course/console/lib/mission-session.mjs";
 
 const mission = {
   id: 41,
@@ -96,7 +96,7 @@ test("binds a remaining-route draft to both plan and occurrence revisions", () =
     mission: { ...mission, id: 42 },
     finishBehavior: "stop",
     items: [],
-  }), /기준 버전/);
+  }), /has no base version/);
 });
 
 test("sends the plan and occurrence revisions captured at preflight", () => {
@@ -107,7 +107,7 @@ test("sends the plan and occurrence revisions captured at preflight", () => {
     expected_plan_hash: "hash-at-open",
     expected_occurrence_revision: "occurrences-at-open",
   });
-  assert.throws(() => buildMissionCommandPayload({ token, missionId: mission.id + 1 }), /현재 미션이 다릅니다/);
+  assert.throws(() => buildMissionCommandPayload({ token, missionId: mission.id + 1 }), /differs from the current mission/);
   assert.equal(missionCommandToken({ ...mission, occurrence_revision: null }), null);
   const edited = {
     ...mission,
@@ -752,9 +752,9 @@ test("puts reviewed geometry on preset writes and revision tokens on mutations",
     ...common,
     existing: { id: 4, preset_revision: "preset-at-read" },
   }).expected_preset_revision, "preset-at-read");
-  assert.throws(() => buildMissionPresetPayload({ ...common, existing: { id: 4 } }), /기준 버전/);
+  assert.throws(() => buildMissionPresetPayload({ ...common, existing: { id: 4 } }), /has no base version/);
   assert.deepEqual(buildMissionPresetDeletePayload({ preset_revision: "preset-at-read" }), {
     expected_preset_revision: "preset-at-read",
   });
-  assert.throws(() => buildMissionPresetDeletePayload({ id: 4 }), /기준 버전/);
+  assert.throws(() => buildMissionPresetDeletePayload({ id: 4 }), /has no base version/);
 });

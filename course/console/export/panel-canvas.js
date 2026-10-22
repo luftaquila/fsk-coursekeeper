@@ -99,7 +99,7 @@ export function renderTwoPanelPNG(cl, edges, { name = "course" } = {}) {
   const projL = project(0);
   polyline(projL, P, "#111", 1.4, cl.closed);
   cones(projL);
-  title(0, `${name} — 중심선 (${cl.length.toFixed(0)} m)`);
+  title(0, `${name} — centerline (${cl.length.toFixed(0)} m)`);
 
   // right panel — road width
   const originR = panelW + gap;
@@ -109,7 +109,7 @@ export function renderTwoPanelPNG(cl, edges, { name = "course" } = {}) {
   polyline(projR, Re, "#7a1414", 1.6, cl.closed);
   polyline(projR, P, "#111", 1.0, cl.closed);
   cones(projR);
-  title(originR, `도로폭 (median ${median(width).toFixed(2)} m, min ${Math.min(...width).toFixed(2)} m)`);
+  title(originR, `Road width (median ${median(width).toFixed(2)} m, min ${Math.min(...width).toFixed(2)} m)`);
 
   return new Promise((resolve) => canvas.toBlob((b) => resolve(b), "image/png"));
 }

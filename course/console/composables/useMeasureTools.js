@@ -1,6 +1,6 @@
 import { ref, onUnmounted } from "vue";
 import L from "leaflet";
-import { haversine } from "@lib/geo.mjs";
+import { haversine } from "../../geo.mjs";
 
 // Ruler / protractor measurement overlays for the course map, extracted from
 // MapView. Owns its own toolMode/result state + the Leaflet overlay layer.
@@ -95,7 +95,7 @@ export function useMeasureTools({ getMap, rebuildMarkers, isCoursesTab, clearOth
       measureLabel(L.latLng((a.lat + b.lat) / 2, (a.lng + b.lng) / 2), fmtDist(seg)).addTo(measureLayer);
       let total = 0;
       for (let i = 1; i < measurePoints.length; i++) total += haversine(measurePoints[i - 1], measurePoints[i]);
-      measureResult.value = n > 2 ? `구간 ${fmtDist(seg)} · 합계 ${fmtDist(total)}` : fmtDist(seg);
+      measureResult.value = n > 2 ? `Segment ${fmtDist(seg)} · Total ${fmtDist(total)}` : fmtDist(seg);
     }
   }
 

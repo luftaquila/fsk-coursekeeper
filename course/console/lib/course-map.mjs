@@ -1,5 +1,30 @@
 import L from "leaflet";
 
+// The host configures the VWorld key; without one the basemap falls back to Google.
+let vworldKey = null;
+export function setBaseMapKey(key) {
+  vworldKey = typeof key === "string" && key.trim() ? key.trim() : null;
+}
+
+// VWorld imagery is georeferenced to the Korean national datum, so RTK WGS84
+// points land where they actually are; Google's Korea satellite tiles are offset
+// several meters. VWorld tiles top out at native zoom 19, upscaled to 21.
+export function addBaseMapLayers(map, tileOptions = {}) {
+  if (vworldKey) {
+    L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Satellite/{z}/{y}/{x}.jpeg`, {
+      ...tileOptions, attribution: "&copy; VWorld", maxNativeZoom: 19, maxZoom: 21,
+    }).addTo(map);
+    // Transparent road/place-label overlay, matching Google hybrid's labels.
+    L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Hybrid/{z}/{y}/{x}.png`, {
+      ...tileOptions, attribution: "&copy; VWorld", maxNativeZoom: 19, maxZoom: 21,
+    }).addTo(map);
+  } else {
+    L.tileLayer("https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&scale=2", {
+      ...tileOptions, subdomains: "0123", attribution: "&copy; Google", maxZoom: 21,
+    }).addTo(map);
+  }
+}
+
 export async function createCourseBaseMap(element, options = {}) {
   // leaflet-rotate patches the global Leaflet object when its UMD bundle loads.
   globalThis.L = L;
@@ -9,28 +34,7 @@ export async function createCourseBaseMap(element, options = {}) {
     rotate: true, rotateControl: false, touchRotate: false,
     ...options,
   }).setView([35.292012, 126.574415], 19);
-  // Basemap. VWorld satellite when a key is configured (window.__VWORLD_KEY__,
-  // injected at container start by entrypoint.sh from $VWORLD_KEY). VWorld's
-  // imagery is georeferenced to the Korean national datum, so RTK WGS84 points
-  // land where they actually are — Google's Korea satellite tiles are offset
-  // several meters. Falls back to Google where no key is set (local dev,
-  // production) so those environments stay unchanged.
-  // VWorld tiles top out at native zoom 19; maxNativeZoom upscales 19→21 so the
-  // map's 21 max stays usable (blurry past 19, but no blank tiles).
-  const vworldKey = window.__VWORLD_KEY__;
-  if (vworldKey) {
-    L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Satellite/{z}/{y}/{x}.jpeg`, {
-      attribution: "&copy; VWorld", maxNativeZoom: 19, maxZoom: 21,
-    }).addTo(map);
-    // Transparent road/place-label overlay, matching Google hybrid's labels.
-    L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Hybrid/{z}/{y}/{x}.png`, {
-      attribution: "&copy; VWorld", maxNativeZoom: 19, maxZoom: 21,
-    }).addTo(map);
-  } else {
-    L.tileLayer("https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&scale=2", {
-      subdomains: "0123", attribution: "&copy; Google", maxZoom: 21,
-    }).addTo(map);
-  }
+  addBaseMapLayers(map);
 
   return map;
 }

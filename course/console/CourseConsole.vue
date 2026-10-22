@@ -1,16 +1,17 @@
 <script setup>
-import { ref, computed, watch, provide, onUnmounted } from "vue";
-import { useRoute } from "vue-router";
-import NavMenu from "@shared/browser/NavMenu.vue";
-import SonnerToaster from "@shared/browser/SonnerToaster.vue";
-import { request } from "./api.js";
-import { useNotification } from "@shared/browser/useNotification.js";
-import { permissionComputed } from "@shared/browser/officialsStore.js";
+import { ref, watch, provide, onUnmounted } from "vue";
+import MapView from "./views/MapView.vue";
+import { useNotification } from "./notify.mjs";
+import { useHost } from "./host.mjs";
 
 const { error: notifyError } = useNotification();
-const canOperateRover = permissionComputed("rover.operate");
-const route = useRoute();
-const isPublic = computed(() => route.meta.public === true);
+const host = useHost();
+const canOperateRover = host.access.permission("rover.operate");
+function roverRequest(endpoint, options) {
+  const transport = host.devices.transport("rover");
+  if (!transport) return Promise.reject(new Error("No rover is configured."));
+  return transport.request(endpoint, options);
+}
 
 const roverConnected = ref(false);
 const navState = ref(null);
@@ -20,12 +21,12 @@ provide("roverConnected", roverConnected);
 provide("navState", navState);
 provide("roverStopRequested", roverStopRequested);
 // Visible to MapView (and any future descendant) via inject so the path-execute
-// button can surface "정지 요청 중..." in the same window the global e-stop
+// button can surface "Requesting stop..." in the same window the global e-stop
 // latch is held — both buttons need to reflect the same in-flight command.
 provide("stopping", stopping);
 
 // True only while the SSE link is in a reconnecting state, so the UI can show
-// a small "연결 재시도 중" badge instead of silently freezing.
+// a small "Reconnecting…" badge instead of silently freezing.
 const sseReconnecting = ref(false);
 provide("sseReconnecting", sseReconnecting);
 
@@ -60,11 +61,11 @@ async function globalEmergencyStop() {
   stopping.value = true;
   try {
     const path = stopRequestedKind === "clear" ? "/api/rover/clear-emergency" : "/api/rover/stop";
-    await request(path, { method: "POST" });
+    await roverRequest(path, { method: "POST" });
   } catch (err) {
     const kind = stopRequestedKind;
     clearStopLatch();
-    notifyError((kind === "clear" ? "비상정지 해제 실패: " : "비상정지 실패: ") + err.message);
+    notifyError((kind === "clear" ? "Failed to release E-stop: " : "E-stop failed: ") + err.message);
     return;
   }
   // Hold the latch until telemetry confirms the rover reached the requested
@@ -82,18 +83,17 @@ watch([navState, roverStopRequested], ([cur, stopRequested]) => {
 
 async function fetchStatus() {
   try {
-    const res = await request("/api/rover/status");
+    const res = await roverRequest("/api/rover/status");
     const data = await res.json();
-    if (isPublic.value) return;
     roverConnected.value = !!data.connected;
     navState.value = data.nav_state || null;
     roverStopRequested.value = data.stop_requested === true;
   } catch { /* best-effort */ }
 }
 
-watch([canOperateRover, isPublic], ([canOperate, publicView]) => {
-  if (publicView) { roverConnected.value = false; sseReconnecting.value = false; clearStopLatch(); }
-  else if (canOperate) void fetchStatus();
+// The rover selection appears once the console has loaded the host's devices.
+watch([canOperateRover, () => host.devices.selection.rover], ([canOperate, rover]) => {
+  if (canOperate && rover != null) void fetchStatus();
 }, { immediate: true });
 
 onUnmounted(() => {
@@ -102,67 +102,32 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="app-container app-fullheight">
-    <SonnerToaster />
-    <header v-if="isPublic" class="header">
-      <div class="header-content">
-        <a href="/" class="logo">
-          <span class="logo-icon">🏁</span>
-          <h1>FSK 경기 코스</h1>
-        </a>
-        <div class="header-actions">
-          <NavMenu currentPath="/course/public" />
-        </div>
-      </div>
-    </header>
-    <main class="main-fill">
-      <router-view />
-    </main>
+  <MapView />
 
-    <!-- SSE 재연결 진행 중 표시: 무음 freeze 방지용. 자동 화해는 onopen 에서
-         일어나므로 이 배지는 시각적 신호만 담당. -->
-    <div v-if="!isPublic && sseReconnecting" class="sse-reconnecting" role="status">
-      <span class="sse-spinner"></span> 연결 재시도 중...
-    </div>
-
-    <!-- Global emergency stop: visible only when rover is connected.
-         Stronger visual emphasis when a mission is actively running.
-         Morphs to a release button when the rover is latched in
-         EMERGENCY_STOP so the operator can clear without a tab change. -->
-    <button
-      v-if="!isPublic && roverConnected"
-      :class="['global-estop', { active: isMissionActive(), release: inEmergency() }]"
-      :disabled="stopping"
-      @click="globalEmergencyStop"
-      :title="inEmergency() ? '비상정지 해제' : '비상정지 (모든 화면에서 접근 가능)'"
-    >
-      <template v-if="stopping">{{ inEmergency() ? '해제 중...' : '정지 중...' }}</template>
-      <template v-else-if="inEmergency()">▶ 비상정지 해제</template>
-      <template v-else>⏹ 비상정지</template>
-    </button>
+  <!-- SSE 재연결 진행 중 표시: 무음 freeze 방지용. 자동 화해는 onopen 에서
+       일어나므로 이 배지는 시각적 신호만 담당. -->
+  <div v-if="sseReconnecting" class="sse-reconnecting" role="status">
+    <span class="sse-spinner"></span> Reconnecting…
   </div>
+
+  <!-- Global emergency stop: visible only when rover is connected.
+       Stronger visual emphasis when a mission is actively running.
+       Morphs to a release button when the rover is latched in
+       EMERGENCY_STOP so the operator can clear without a tab change. -->
+  <button
+    v-if="roverConnected"
+    :class="['global-estop', { active: isMissionActive(), release: inEmergency() }]"
+    :disabled="stopping"
+    @click="globalEmergencyStop"
+    :title="inEmergency() ? 'Release E-stop' : 'Emergency stop (available on every screen)'"
+  >
+    <template v-if="stopping">{{ inEmergency() ? 'Releasing...' : 'Stopping...' }}</template>
+    <template v-else-if="inEmergency()">▶ Release E-stop</template>
+    <template v-else>⏹ Emergency stop</template>
+  </button>
 </template>
 
 <style scoped>
-.app-fullheight {
-  display: flex;
-  flex-direction: column;
-  height: 100dvh;
-  /* Override the shared .app-container `min-height: 100vh`. On mobile the app
-     never scrolls (overflow: hidden), so the browser address bar stays pinned;
-     a 100vh floor then exceeds the visible 100dvh and pushes the top content
-     (the status chip bar) behind the address bar. Cap the floor at 100dvh. */
-  min-height: 100dvh;
-  overflow: hidden;
-  position: relative;
-}
-
-.main-fill {
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-
 /* z-index 999: sits above Leaflet panes (max 700) and level with the status strip. */
 .global-estop {
   position: fixed;

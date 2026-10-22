@@ -186,7 +186,7 @@ function buildRoadSurface(metric, { cellSize = 0.5, maxVertices = 62000 } = {}) 
       for (let k = 0; k < 4; k++) emitClipped([quad[k], quad[(k + 1) % 4], mid]);
     }
   }
-  if (!indices.length) throw new Error("주행 마커 경로에서 도로 메시를 만들 수 없습니다.");
+  if (!indices.length) throw new Error("Could not build a road mesh from the route marker path.");
   return { positions, normals, uvs, indices, bounds, cellSize: cell };
 }
 
@@ -298,7 +298,7 @@ function buildAi(route) {
 
 /** Build KN5 + support AI data for a computeGuidedRoute result. */
 export function buildGuidedTrackModel(route, cones, opts = {}) {
-  if (!route?.metric?.usedEdgeIds?.length) throw new Error("주행 경로가 도로 구간을 포함하지 않습니다.");
+  if (!route?.metric?.usedEdgeIds?.length) throw new Error("The guided route does not contain any road segment.");
   const name = opts.name || "course";
   const roadMesh = buildRoadSurface(route.metric);
   const groundMesh = buildGround(route.metric, roadMesh.bounds);

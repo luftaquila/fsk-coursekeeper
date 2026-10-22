@@ -33,7 +33,7 @@ export function buildMissionCommandPayload({ token, missionId, force = false }) 
   if (!token || token.missionId !== missionId
       || typeof token.planHash !== "string"
       || typeof token.occurrenceRevision !== "string") {
-    throw Object.assign(new Error("점검한 미션과 현재 미션이 다릅니다. 최신 미션을 다시 점검하세요."), {
+    throw Object.assign(new Error("The checked mission differs from the current mission. Check the latest mission again."), {
       reason: "mission_preflight_mismatch",
     });
   }
@@ -87,7 +87,7 @@ export function buildMissionRemainingPayload({ draft, mission, finishBehavior, i
   if (!draft || !mission || draft.missionId !== mission.id
       || typeof draft.planHash !== "string"
       || typeof draft.occurrenceRevision !== "string") {
-    throw Object.assign(new Error("미션 경로 초안의 기준 버전이 없습니다. 최신 미션을 다시 불러오세요."), {
+    throw Object.assign(new Error("The mission route draft has no base version. Reload the latest mission."), {
       reason: "mission_draft_mismatch",
     });
   }
@@ -474,7 +474,7 @@ export function missionPreflightCanConfirm(checks, force = false) {
 
 export function buildMissionPresetPayload({ courseId, name, finishBehavior, items, existing = null }) {
   if (existing && typeof existing.preset_revision !== "string") {
-    throw Object.assign(new Error("프리셋의 기준 버전이 없습니다. 목록을 다시 불러오세요."), {
+    throw Object.assign(new Error("The preset has no base version. Reload the list."), {
       reason: "preset_revision_missing",
     });
   }
@@ -495,7 +495,7 @@ export function buildMissionPresetPayload({ courseId, name, finishBehavior, item
 
 export function buildMissionPresetDeletePayload(preset) {
   if (!preset || typeof preset.preset_revision !== "string") {
-    throw Object.assign(new Error("프리셋의 기준 버전이 없습니다. 목록을 다시 불러오세요."), {
+    throw Object.assign(new Error("The preset has no base version. Reload the list."), {
       reason: "preset_revision_missing",
     });
   }

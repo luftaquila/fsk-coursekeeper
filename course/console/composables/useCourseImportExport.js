@@ -1,10 +1,9 @@
 import { ref } from "vue";
-import { request } from "../api.js";
 import { buildCourseArchive, downloadCourseArchive } from "../export/course-archive.mjs";
 
 // Operator import/export owns API access; archive generation is shared with the
 // public viewer, which supplies its own annotation-free data from public APIs.
-export function useCourseImportExport({ courses, conesMap, memosMap, routeMap, activeCourseId, newCourseName, notifyError }) {
+export function useCourseImportExport({ request, courses, conesMap, memosMap, routeMap, activeCourseId, newCourseName, notifyError }) {
   const importInput = ref(null);
   const exportingId = ref(null);
 

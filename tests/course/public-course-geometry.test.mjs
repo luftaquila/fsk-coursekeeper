@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createPublicCourseGeometry } from "../../course/web/src/lib/public-course-geometry.mjs";
+import { createPublicCourseGeometry } from "../../course/console/lib/public-course-geometry.mjs";
 
 const detail = { course: {}, cones: [], route: { markers: [], steps: [] } };
 function fixture() {
@@ -54,7 +54,7 @@ test("worker failures leave the map usable without synchronous route calculation
 test("the actual worker preserves route geometry and frees the caller before completion", async (t) => {
   const { Worker } = await import("node:worker_threads");
   const { readFileSync } = await import("node:fs");
-  const { publicCourseGeometry } = await import("../../course/web/src/lib/public-course-geometry.worker.mjs");
+  const { publicCourseGeometry } = await import("../../course/console/lib/public-course-geometry.worker.mjs");
   const { cones } = JSON.parse(readFileSync(new URL("./fixtures/endurance.json", import.meta.url)));
   const input = { course: { reverse: true }, cones, route: { markers: [], steps: [] } };
   const before = performance.now();

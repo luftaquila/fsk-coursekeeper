@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { courseDisplayState } from "../../course/web/src/lib/course-display.mjs";
+import { courseDisplayState } from "../../course/console/lib/course-display.mjs";
 
 test("selection always displays the course, even with an explicit hidden preference", () => {
   assert.equal(courseDisplayState(1, 1, { 1: false }), "selected");

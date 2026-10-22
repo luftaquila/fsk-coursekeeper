@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import {
   haversine, COORD_DECIMALS, formatCoord, formatLatLng, ALT_DECIMALS, formatAlt,
-} from "../../course/lib/geo.mjs";
+} from "../../course/geo.mjs";
 
 describe("haversine", () => {
   it("returns 0 for the same point", () => {

@@ -34,22 +34,22 @@ export function createPublicCourseData(state, { request }) {
     } catch (error) {
       if (disposed || current !== generation) return;
       state.courses = [];
-      state.error = error.message || "공개 코스를 불러오지 못했습니다.";
+      state.error = error.message || "Failed to load public courses.";
     } finally {
       if (!disposed && current === generation) state.loading = false;
     }
   }
 
   async function exportCourse(id, buildArchive) {
-    if (disposed || state.loading || !state.details[id]) throw new Error("공개 코스를 다시 불러온 뒤 다운로드하세요.");
+    if (disposed || state.loading || !state.details[id]) throw new Error("Reload the public courses before downloading.");
     // The displayed snapshot stays unchanged until a manual refresh. Downloads
     // independently recheck publication, without refreshing the map on failure.
     const detail = await request(`/api/public/courses/${id}`);
-    if (disposed) throw new Error("코스가 변경되었습니다. 다시 다운로드하세요.");
+    if (disposed) throw new Error("The course has changed. Download it again.");
     const archive = await buildArchive(detail);
     const latest = await request(`/api/public/courses/${id}`);
     if (disposed || JSON.stringify(latest) !== JSON.stringify(detail)) {
-      throw new Error("코스가 변경되었습니다. 다시 다운로드하세요.");
+      throw new Error("The course has changed. Download it again.");
     }
     return archive;
   }

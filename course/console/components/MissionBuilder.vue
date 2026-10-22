@@ -1,7 +1,8 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import L from "leaflet";
-import { buildSideRanks } from "@lib/cone-index.mjs";
+import { buildSideRanks } from "../../cone-index.mjs";
+import { addBaseMapLayers } from "../lib/course-map.mjs";
 import {
   duplicateConeIds,
   filterCones,
@@ -170,7 +171,7 @@ function moveFromInput(index, event) {
 
 function duplicate(index) {
   if (routeAtLimit.value) return;
-  if (!window.confirm("같은 콘을 한 번 더 방문하고 분사합니다. 반복 방문을 추가할까요?")) return;
+  if (!window.confirm("This visits the same cone again and dispenses again. Add a repeat visit?")) return;
   const copy = routeItem({
     ...route.value[index], id: undefined, waypoint_id: null,
     client_key: undefined, outcome: undefined,
@@ -242,23 +243,10 @@ let positionMapLayer = null;
 let mapInitCancelled = false;
 
 function addBaseMapLayer() {
-  const vworldKey = window.__VWORLD_KEY__;
   // The popup map is short-lived. Keep no off-screen tile ring and fetch after
   // movement settles so opening it does not leave a large decoded-image set in
   // the browser after teardown.
-  const tileOptions = { keepBuffer: 0, updateWhenIdle: true };
-  if (vworldKey) {
-    L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Satellite/{z}/{y}/{x}.jpeg`, {
-      ...tileOptions, attribution: "&copy; VWorld", maxNativeZoom: 19, maxZoom: 21,
-    }).addTo(builderMap);
-    L.tileLayer(`https://api.vworld.kr/req/wmts/1.0.0/${vworldKey}/Hybrid/{z}/{y}/{x}.png`, {
-      ...tileOptions, attribution: "&copy; VWorld", maxNativeZoom: 19, maxZoom: 21,
-    }).addTo(builderMap);
-  } else {
-    L.tileLayer("https://mt{s}.google.com/vt/lyrs=y&x={x}&y={y}&z={z}&scale=2", {
-      ...tileOptions, subdomains: "0123", attribution: "&copy; Google", maxZoom: 21,
-    }).addTo(builderMap);
-  }
+  addBaseMapLayers(builderMap, { keepBuffer: 0, updateWhenIdle: true });
 }
 
 function renderConeMapLayer() {
@@ -276,7 +264,7 @@ function renderConeMapLayer() {
       fillOpacity: selected ? 1 : 0.82,
     });
     marker.bindTooltip(
-      `<strong>${coneDisplayName(cone)}</strong><br>ID ${cone.id}${visits ? `<br>${visits}회 방문` : ""}`,
+      `<strong>${coneDisplayName(cone)}</strong><br>ID ${cone.id}${visits ? `<br>Visits: ${visits}` : ""}`,
       { direction: "top", offset: [0, -8] },
     );
     marker.on("click", () => toggleCone(cone));
@@ -329,7 +317,7 @@ function renderRouteMapLayer() {
       zIndexOffset: active ? 1200 : 1000,
     });
     marker.bindTooltip(
-      `${coneDisplayName(item)} · 방문 ${indices.join(", ")}번째`,
+      `${coneDisplayName(item)} · order ${indices.join(", ")}`,
       { direction: "top", offset: [0, -24] },
     );
     marker.on("click", () => {
@@ -352,7 +340,7 @@ function renderPositionMapLayer() {
         iconSize: [34, 34], iconAnchor: [17, 17],
       }),
       zIndexOffset: 1500,
-    }).bindTooltip("현재 로버 위치", { direction: "top" }).addTo(positionMapLayer);
+    }).bindTooltip("Current rover position", { direction: "top" }).addTo(positionMapLayer);
   }
   if (validPosition(props.missionStart)) {
     L.marker([props.missionStart.lat, props.missionStart.lng], {
@@ -362,7 +350,7 @@ function renderPositionMapLayer() {
         iconSize: [30, 30], iconAnchor: [15, 15],
       }),
       zIndexOffset: 1400,
-    }).bindTooltip("미션 시작 위치", { direction: "top" }).addTo(positionMapLayer);
+    }).bindTooltip("Mission start position", { direction: "top" }).addTo(positionMapLayer);
   }
 }
 
@@ -461,57 +449,57 @@ function drop(index) {
 
 <template>
   <div class="mission-builder-backdrop" @click.self="close">
-    <section class="mission-builder" role="dialog" aria-modal="true" aria-label="미션 경로 편집" :aria-busy="busy">
+    <section class="mission-builder" role="dialog" aria-modal="true" aria-label="Edit mission route" :aria-busy="busy">
       <header>
         <div>
-          <h2>{{ editing ? '남은 미션 경로 편집' : '새 미션 경로' }}</h2>
-          <p v-if="editing">완료한 콘은 유지됩니다. 여기서는 아직 방문하지 않은 경로만 바꿉니다.</p>
-          <p v-else>원하는 콘만 고르고, 방문 순서를 자유롭게 정하세요.</p>
+          <h2>{{ editing ? 'Edit remaining mission route' : 'New mission route' }}</h2>
+          <p v-if="editing">Completed cones are kept. This only changes the route not yet visited.</p>
+          <p v-else>Pick the cones you want and set the visit order freely.</p>
         </div>
-        <button class="close" aria-label="닫기" :disabled="busy" @click="close">×</button>
+        <button class="close" aria-label="Close" :disabled="busy" @click="close">×</button>
       </header>
 
       <div class="preset-row">
         <select v-model="presetId" :disabled="presetBusy" @change="loadPreset">
-          <option value="">프리셋 불러오기</option>
+          <option value="">Load preset</option>
           <option v-for="preset in presets" :key="preset.id" :value="preset.id">
-            {{ preset.name }} ({{ preset.items.length }}){{ preset.stale ? ' — 삭제된 콘 포함' : '' }}
+            {{ preset.name }} ({{ preset.items.length }}){{ preset.stale ? ' — includes deleted cones' : '' }}
           </option>
         </select>
-        <input v-model="presetName" :disabled="presetBusy" maxlength="100" placeholder="프리셋 이름" @keyup.enter="savePreset" />
+        <input v-model="presetName" :disabled="presetBusy" maxlength="100" placeholder="Preset name" @keyup.enter="savePreset" />
         <button
           @click="savePreset"
           :disabled="presetBusy || !presetName.trim() || route.length === 0 || unavailablePresetItems.length > 0 || !canSubmit"
         >
-          {{ presetBusy ? '저장 중…' : '저장' }}
+          {{ presetBusy ? 'Saving…' : 'Save' }}
         </button>
         <button
           class="danger-text" :disabled="presetBusy || !presetId"
           @click="emit('delete-preset', Number(presetId)); presetId = ''"
-        >삭제</button>
+        >Delete</button>
       </div>
 
       <div class="builder-workspace">
         <section class="cone-picker">
           <div class="section-title">
             <div>
-              <strong>코스 콘</strong>
-              <small>지도나 목록을 눌러 추가·제거</small>
+              <strong>Course cones</strong>
+              <small>Tap the map or list to add or remove</small>
             </div>
-            <span>{{ selectedIds.size }}/{{ cones.length }}종</span>
+            <span>{{ selectedIds.size }}/{{ cones.length }} cones</span>
           </div>
           <div class="filters">
-            <input v-model="query" aria-label="콘 검색" placeholder="번호·ID·좌표 검색" />
-            <select v-model="side" aria-label="콘 종류 필터">
-              <option value="all">모든 종류</option>
-              <option value="left">왼쪽</option>
-              <option value="right">오른쪽</option>
-              <option value="center">중앙</option>
+            <input v-model="query" aria-label="Search cones" placeholder="Search number, ID, or coordinates" />
+            <select v-model="side" aria-label="Cone side filter">
+              <option value="all">All sides</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="center">Center</option>
             </select>
           </div>
           <div class="bulk-action-grid">
-            <button @click="selectAll">모든 콘 선택</button>
-            <button class="danger-text" @click="clearRoute">선택 비우기</button>
+            <button @click="selectAll">Select all cones</button>
+            <button class="danger-text" @click="clearRoute">Clear selection</button>
           </div>
           <div class="cone-list">
             <label v-for="cone in filteredCones" :key="cone.id" class="cone-row" :class="{ selected: selectedIds.has(cone.id) }">
@@ -521,7 +509,7 @@ function drop(index) {
                 <strong>{{ coneDisplayName(cone) }}</strong>
                 <small>ID {{ cone.id }} · {{ Number(cone.lat).toFixed(6) }}, {{ Number(cone.lng).toFixed(6) }}</small>
               </span>
-              <span v-if="visitCounts.get(cone.id)" class="visit-count">{{ visitCounts.get(cone.id) }}회</span>
+              <span v-if="visitCounts.get(cone.id)" class="visit-count">{{ visitCounts.get(cone.id) }}×</span>
             </label>
           </div>
         </section>
@@ -529,68 +517,68 @@ function drop(index) {
         <section class="builder-map-panel">
           <div class="section-title map-title">
             <div>
-              <strong>경로 지도</strong>
-              <small>색 점은 콘 종류, 보라색 숫자는 방문 순서</small>
+              <strong>Route map</strong>
+              <small>Dot color shows the cone side; purple numbers show the visit order</small>
             </div>
           </div>
           <div class="map-action-grid">
-            <button @click="fitMapToAll">전체 콘 보기</button>
-            <button @click="fitMapToRoute" :disabled="route.length === 0">선택 경로 보기</button>
-            <button @click="centerMapOnCurrent" :disabled="!validPosition(currentPosition)">현재 위치</button>
+            <button @click="fitMapToAll">Show all cones</button>
+            <button @click="fitMapToRoute" :disabled="route.length === 0">Show selected route</button>
+            <button @click="centerMapOnCurrent" :disabled="!validPosition(currentPosition)">Current position</button>
           </div>
           <div class="builder-map-shell">
-            <div ref="mapElement" class="builder-map" aria-label="미션 경로 지도"></div>
+            <div ref="mapElement" class="builder-map" aria-label="Mission route map"></div>
             <div class="map-legend" aria-hidden="true">
-              <span><i class="legend-dot left"></i>왼쪽</span>
-              <span><i class="legend-dot center"></i>중앙</span>
-              <span><i class="legend-dot right"></i>오른쪽</span>
-              <span><i class="legend-route">1</i>방문 순서</span>
-              <span><i class="legend-progress"></i>초기→후반</span>
-              <span><i class="legend-direction">›</i>진행 방향</span>
+              <span><i class="legend-dot left"></i>Left</span>
+              <span><i class="legend-dot center"></i>Center</span>
+              <span><i class="legend-dot right"></i>Right</span>
+              <span><i class="legend-route">1</i>Visit order</span>
+              <span><i class="legend-progress"></i>Early→late</span>
+              <span><i class="legend-direction">›</i>Travel direction</span>
             </div>
           </div>
-          <p class="map-help">콘을 누르면 경로에 추가·제거됩니다. 경로색은 초록에서 빨강 순서로, 화살표는 진행 방향을 나타냅니다.</p>
+          <p class="map-help">Tap a cone to add or remove it. The route runs from green to red in order; arrows show the travel direction.</p>
         </section>
 
         <section class="route-editor">
           <div class="section-title">
             <div>
-              <strong>주행 순서</strong>
-              <small>드래그하거나 순서 번호를 입력</small>
+              <strong>Route order</strong>
+              <small>Drag or enter an order number</small>
             </div>
-            <span>{{ route.length }}회</span>
+            <span>{{ route.length }} visits</span>
           </div>
           <div v-if="routeAtLimit" class="duplicate-warning">
-            완료 항목을 포함해 미션당 최대 {{ MISSION_MAX_OCCURRENCES.toLocaleString() }}회 방문할 수 있습니다.
+            A mission allows up to {{ MISSION_MAX_OCCURRENCES.toLocaleString() }} visits, including completed ones.
           </div>
           <div class="route-action-grid">
             <button
               class="auto-sort" :disabled="route.length < 2 || !validPosition(currentPosition)"
-              :title="validPosition(currentPosition) ? '현재 로버 위치에서 가까운 순서로 정렬' : '현재 로버 위치가 필요합니다'"
+              :title="validPosition(currentPosition) ? 'Sort by distance from the current rover position' : 'Needs the current rover position'"
               @click="optimizeFromCurrent"
-            >⌖ 현재 위치부터 자동 정렬</button>
-            <button :disabled="route.length < 2" @click="reverseRoute">⇅ 경로 역순</button>
-            <button class="danger-text" :disabled="route.length === 0" @click="clearRoute">경로 비우기</button>
+            >⌖ Auto-sort from current position</button>
+            <button :disabled="route.length < 2" @click="reverseRoute">⇅ Reverse route</button>
+            <button class="danger-text" :disabled="route.length === 0" @click="clearRoute">Clear route</button>
           </div>
           <div v-if="duplicateIds.size" class="duplicate-warning">
-            반복 방문 콘 {{ duplicateIds.size }}종 — 각 항목에서 한 번씩 분사합니다.
+            {{ duplicateIds.size }} cones are visited more than once — each visit dispenses once.
           </div>
           <div v-if="uncertainIds.size" class="uncertain-warning">
-            분사 결과를 확인할 수 없는 방문이 {{ uncertainIds.size }}개 있습니다.
-            재분사하지 않으려면 해당 항목을 제거하고, 명시적으로 다시 분사하려면 제거 후 같은 콘을 새 방문으로 추가하세요.
+            {{ uncertainIds.size }} visits have an unconfirmed dispense result.
+            Remove them to skip dispensing again, or remove them and add the same cone as a new visit to dispense again.
           </div>
           <div v-if="unavailableRouteItems.length" class="unavailable-warning">
-            현재 코스에서 삭제된 콘이 {{ unavailableRouteItems.length }}개 있습니다.
-            해당 항목을 제거하거나 현재 코스 콘으로 교체해야 적용·실행·저장할 수 있습니다.
+            {{ unavailableRouteItems.length }} cones were deleted from the current course.
+            Remove them or replace them with current course cones before applying, running, or saving.
           </div>
           <div v-if="route.length === 0 && emptyRouteMode === 'return_only'" class="empty-route-notice">
-            콘을 방문하지 않고 현재 위치에서 최초 미션 시작점으로 복귀합니다.
+            Returns from the current position to the mission start point without visiting cones.
           </div>
           <div v-else-if="route.length === 0 && emptyRouteMode === 'resolve_uncertain'" class="empty-route-notice uncertain-warning">
-            분사 결과가 불확실한 마지막 방문을 다시 분사하지 않고 명시적으로 완료 처리합니다.
+            Explicitly completes the last visit with an uncertain dispense result without dispensing again.
           </div>
           <div v-else-if="route.length === 0" class="empty">
-            일반 미션은 남은 콘이 하나 이상 필요합니다. 콘을 추가하거나 시작점 복귀를 명시적으로 선택하세요.
+            A regular mission needs at least one remaining cone. Add cones or explicitly choose to return to the start point.
           </div>
           <div ref="routeListElement" class="route-list">
             <div
@@ -604,7 +592,7 @@ function drop(index) {
               <label class="route-position" @click.stop>
                 <input
                   class="position" type="number" min="1" :max="route.length" :value="index + 1"
-                  :aria-label="`${index + 1}번째 방문 순서`" title="방문 순서"
+                  :aria-label="`Order of visit ${index + 1}`" title="Visit order"
                   @change="moveFromInput(index, $event)"
                 />
               </label>
@@ -613,16 +601,16 @@ function drop(index) {
                 <strong>{{ coneDisplayName(item) }}</strong>
                 <small>ID {{ item.cone_id }} · {{ coneShortName(item) }}</small>
                 <span class="route-badges">
-                  <em v-if="duplicateIds.has(item.cone_id)" class="repeat">반복</em>
-                  <em v-if="uncertainIds.has(item.waypoint_id || item.id)" class="uncertain">결과 확인</em>
-                  <em v-if="unavailableRouteKeys.has(item.client_key)" class="unavailable">삭제된 콘</em>
+                  <em v-if="duplicateIds.has(item.cone_id)" class="repeat">Repeat</em>
+                  <em v-if="uncertainIds.has(item.waypoint_id || item.id)" class="uncertain">Check result</em>
+                  <em v-if="unavailableRouteKeys.has(item.client_key)" class="unavailable">Deleted cone</em>
                 </span>
               </span>
               <span class="route-row-actions" @click.stop>
-                <button title="한 칸 위로" aria-label="한 칸 위로" :disabled="index === 0" @click="move(index, index - 1)">↑</button>
-                <button title="한 칸 아래로" aria-label="한 칸 아래로" :disabled="index === route.length - 1" @click="move(index, index + 1)">↓</button>
-                <button title="반복 방문 추가" aria-label="반복 방문 추가" :disabled="routeAtLimit" @click="duplicate(index)">＋</button>
-                <button class="remove" title="경로에서 제거" aria-label="경로에서 제거" @click="removeRouteItem(index)">×</button>
+                <button title="Move up" aria-label="Move up" :disabled="index === 0" @click="move(index, index - 1)">↑</button>
+                <button title="Move down" aria-label="Move down" :disabled="index === route.length - 1" @click="move(index, index + 1)">↓</button>
+                <button title="Add repeat visit" aria-label="Add repeat visit" :disabled="routeAtLimit" @click="duplicate(index)">＋</button>
+                <button class="remove" title="Remove from route" aria-label="Remove from route" @click="removeRouteItem(index)">×</button>
               </span>
             </div>
           </div>
@@ -630,17 +618,17 @@ function drop(index) {
       </div>
 
       <footer>
-        <label>마지막 콘 이후
+        <label>After the last cone
           <select v-model="finishBehavior">
-            <option value="stop">그 자리에서 정지</option>
-            <option value="return_to_start">최초 미션 시작점으로 복귀</option>
+            <option value="stop">Stop in place</option>
+            <option value="return_to_start">Return to mission start</option>
           </select>
         </label>
         <div class="footer-actions">
-          <button :disabled="busy" @click="close">취소</button>
-          <button :disabled="busy || !canSubmit" @click="emit('apply', payload())">경로 적용</button>
+          <button :disabled="busy" @click="close">Cancel</button>
+          <button :disabled="busy || !canSubmit" @click="emit('apply', payload())">Apply route</button>
           <button class="primary" :disabled="busy || !canSubmit" @click="emit('run', payload())">
-            {{ editing ? '적용 후 이어하기' : '점검 후 실행' }}
+            {{ editing ? 'Apply and resume' : 'Check and run' }}
           </button>
         </div>
       </footer>

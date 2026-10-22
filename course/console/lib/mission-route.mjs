@@ -97,13 +97,13 @@ export function filterCones(cones, { query = "", side = "all" } = {}) {
   });
 }
 
-const MISSION_SIDE_LABELS = Object.freeze({ left: "왼쪽", center: "중앙", right: "오른쪽" });
+const MISSION_SIDE_LABELS = Object.freeze({ left: "Left", center: "Center", right: "Right" });
 const MISSION_SIDE_SHORT_LABELS = Object.freeze({ left: "L", center: "C", right: "R" });
 
 export function missionConeDisplayName(cone, sideRanks) {
-  if (!cone) return "알 수 없는 콘";
+  if (!cone) return "Unknown cone";
   const rank = sideRanks.get(cone.id ?? cone.cone_id);
-  return `${MISSION_SIDE_LABELS[cone.side] || cone.side} ${rank ? `#${rank}` : "콘"}`;
+  return `${MISSION_SIDE_LABELS[cone.side] || cone.side} ${rank ? `#${rank}` : "cone"}`;
 }
 
 export function missionConeShortName(cone, sideRanks) {
