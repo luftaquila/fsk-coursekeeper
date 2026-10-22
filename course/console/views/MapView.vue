@@ -10,6 +10,7 @@ import MissionBuilder from "../components/MissionBuilder.vue";
 import { optimizeConeRoute } from "../lib/mission-route.mjs";
 import {
   buildMissionCreatePayload,
+  missionRouteCourseMismatch,
   buildMissionCommandPayload,
   buildMissionPresetDeletePayload,
   buildMissionPresetPayload,
@@ -249,15 +250,9 @@ const roverStatus = ref({
   battery: null,
   ntrip: null,
   gps: null,
-  // GPS-receiver (fsk-rover-gps) sub-state — connected/mode/last_position/base.
-  // Populated from the server's rover:status broadcast.
-  receiver: null,
-  // "receiver" | "rover" | null — which device supplies the live cone-capture
-  // position right now. Drives the live marker icon + the source badge/FAB.
-  position_source: null,
-  // "ngii" | "base" — the rover's configured correction source (server config).
-  // Used to warn when base is selected but the receiver isn't connected.
-  ntrip_source: "ngii",
+  // The rover's correction source: { source: "ngii" } or
+  // { source: "caster", host, port, mountpoint } (a GPS unit base station).
+  ntrip_source: { source: "ngii" },
   active_mission: null,
   mission_protocol: { required: 2, connected: null, compatible: false, boot_id: null },
 });
@@ -275,10 +270,40 @@ function syncAppRoverStatus(data) {
   }
 }
 
-// Which device currently supplies the cone-capture position: the GPS receiver
-// (preferred), the rover (fallback), or nothing usable. Drives the 3-state
-// cone-add button icon and its disabled state.
-const positionSource = computed(() => roverStatus.value.position_source || null);
+// The GPS unit serves its own API; its status arrives as gps:status events.
+// null until the unit answers.
+const gpsStatus = ref(null);
+const gpsOnline = ref(false);
+
+async function fetchGpsStatus() {
+  if (!host.devices.transport("gps")) {
+    gpsStatus.value = null;
+    gpsOnline.value = false;
+    return;
+  }
+  try {
+    gpsStatus.value = await (await gpsRequest("/api/gps/status")).json();
+    gpsOnline.value = true;
+  } catch {
+    gpsOnline.value = false;
+  }
+}
+
+// The unit reports position at ~1 Hz while it holds a fix and stops when the fix
+// drops, so an older position means it cannot answer a capture right now.
+const RECEIVER_POSITION_STALE_MS = 5000;
+
+// Which device currently supplies the cone-capture position: the GPS unit
+// (preferred, when it is in capture mode with a fresh fix), the rover
+// (fallback), or nothing usable. Drives the cone-add button icon and state.
+const positionSource = computed(() => {
+  uiTick.value;
+  const r = receiver.value;
+  if (r?.connected && r.mode === "capture" && r.last_position
+      && Date.now() - r.last_position_at < RECEIVER_POSITION_STALE_MS) return "receiver";
+  if (roverStatus.value.connected) return "rover";
+  return null;
+});
 const canCaptureCone = computed(() => positionSource.value != null);
 const coneCaptureIcon = computed(() =>
   positionSource.value === "receiver" ? "🛰️"
@@ -885,7 +910,14 @@ watch(activeTab, (next, prev) => {
 watch(inspectorWidth, (v) => savePref("inspectorWidth", v));
 
 /* ── GPS 관리 (수신기 소스 선택 + base station 측량점) ─────────────────── */
-const gpsConfig = ref({ ntrip_source: "ngii", active_base_point_id: null });
+// The GPS unit's own mode; the rover's correction source lives on the rover.
+const gpsUnitConfig = ref({ mode: "capture", active_base_point_id: null, caster: null });
+// What the GPS tab shows: "base" while the rover takes corrections from the
+// unit's caster; the active point only while the unit is a base station.
+const gpsConfig = computed(() => ({
+  ntrip_source: roverStatus.value.ntrip_source?.source === "caster" ? "base" : "ngii",
+  active_base_point_id: gpsUnitConfig.value.mode === "base" ? gpsUnitConfig.value.active_base_point_id : null,
+}));
 const surveyPoints = ref([]);
 const gpsSaving = ref(false);
 const newSurveyName = ref("");
@@ -895,8 +927,24 @@ const selectedBasePointId = ref(null);
 // highlight). Cleared when its point disappears from the list.
 const selectedSurveyPointId = ref(null);
 
-// 수신기 상태 편의 접근자 (rover:status의 receiver 서브블록).
-const receiver = computed(() => roverStatus.value.receiver || null);
+// The GPS unit's receiver in the shape the GPS tab renders. "online" means the
+// unit answers; "connected" also needs its receiver serial link.
+const receiver = computed(() => {
+  const s = gpsStatus.value;
+  if (!s) return null;
+  return {
+    online: gpsOnline.value,
+    connected: gpsOnline.value && s.receiver_connected !== false,
+    mode: s.mode,
+    fix_status: s.fix_status,
+    last_position: s.last_position ? { lat: s.last_position.lat, lng: s.last_position.lng, alt: s.last_position.alt } : null,
+    last_position_at: s.last_position?.at ?? 0,
+    ntrip_connected: s.ntrip_connected,
+    ntrip: s.ntrip,
+    gps: s.gps,
+    base: s.base,
+  };
+});
 const receiverConnected = computed(() => !!receiver.value?.connected);
 const baseState = computed(() => receiver.value?.base?.state || "idle");
 const surveyingPointId = computed(() =>
@@ -939,10 +987,14 @@ const receiverCorrectionAge = computed(() => {
 // generates its own corrections rather than pulling a caster).
 const receiverGpsRows = computed(() => {
   const r = receiver.value;
-  const connected = !!r?.connected;
+  const online = !!r?.online;
   // Device (network) connection as the first row — same grid style as the GPS rows.
-  const rows = [["DEVICE", connected ? "ONLINE" : "OFFLINE", connected ? "ok" : "bad"]];
-  if (!connected || !r) return rows;
+  const rows = [["DEVICE", online ? "ONLINE" : "OFFLINE", online ? "ok" : "bad"]];
+  if (!online) return rows;
+  if (!r.connected) {
+    rows.push(["RECEIVER", "DISCONNECTED", "bad"]);
+    return rows;
+  }
   const g = r.gps || {};
   const hasFix = !!r.fix_status;
   rows.push(["MODE", hasFix ? r.fix_status.replace(/_/g, " ").toUpperCase() : "NO GPS",
@@ -982,11 +1034,12 @@ const receiverGpsRows = computed(() => {
 const surveyedPoints = computed(() => surveyPoints.value.filter((p) => p.lat != null && p.lng != null));
 const hasSurveyedPoint = computed(() => surveyedPoints.value.length > 0);
 
-// Base source selected but the receiver isn't connected → the rover suppresses
-// NGII yet no base RTCM flows, so it silently drops from RTK-fixed to standalone.
+// The rover takes corrections from the GPS unit's caster but the unit is not a
+// live base station → the rover silently drops from RTK-fixed to standalone.
 // Surface it loudly: a persistent GPS-tab banner + a toast when it first happens.
 const baseNoReceiver = computed(() =>
-  roverStatus.value.ntrip_source === "base" && !(roverStatus.value.receiver?.connected));
+  roverStatus.value.ntrip_source?.source === "caster"
+  && !(receiver.value?.connected && receiver.value.mode === "base"));
 watch(baseNoReceiver, (now, prev) => {
   // Admin-only feature: only the operator who can set/fix the base source should
   // get this toast (the persistent banner lives in the admin GPS tab anyway).
@@ -1006,30 +1059,56 @@ watch([gpsConfig, surveyedPoints], () => {
 }, { deep: true });
 
 async function loadGps() {
+  if (!host.devices.transport("gps")) return;
   try {
     const [cfgRes, spRes] = await Promise.all([
       gpsRequest("/api/gps/config"),
       gpsRequest("/api/gps/survey-points"),
     ]);
-    gpsConfig.value = await cfgRes.json();
-    surveyPoints.value = (await spRes.json()).points || [];
+    gpsUnitConfig.value = await cfgRes.json();
+    surveyPoints.value = await spRes.json();
   } catch (err) {
     notifyError(err.message || "Failed to load GPS settings.");
   }
 }
 
+async function setRoverCorrectionSource(body) {
+  const res = await roverRequest("/api/rover/ntrip-source", { method: "PUT", body: JSON.stringify(body) });
+  roverStatus.value = { ...roverStatus.value, ntrip_source: await res.json() };
+}
+
+async function setGpsUnitMode(mode, activeBasePointId) {
+  const res = await gpsRequest("/api/gps/config", {
+    method: "PUT",
+    body: JSON.stringify({ mode, active_base_point_id: activeBasePointId }),
+  });
+  gpsUnitConfig.value = await res.json();
+}
+
+// A base station takes two steps on two devices: the unit becomes a caster at a
+// surveyed point, then the rover takes its corrections from that caster.
 async function setNtripSource(source, pointId = null) {
-  const body = { ntrip_source: source };
-  if (source === "base") {
-    const pid = pointId != null ? pointId : (selectedBasePointId.value ?? gpsConfig.value.active_base_point_id);
-    if (pid == null) { notifyError("Select a survey point first."); return; }
-    body.active_base_point_id = pid;
-  }
+  const roverAvailable = host.devices.transport("rover") != null;
   gpsSaving.value = true;
   try {
-    const res = await gpsRequest("/api/gps/config", { method: "PUT", body: JSON.stringify(body) });
-    gpsConfig.value = await res.json();
-    notifySuccess(source === "base" ? "Set the GPS unit as the base station." : "Switched corrections to NGII.");
+    if (source === "base") {
+      const pid = pointId ?? selectedBasePointId.value ?? gpsUnitConfig.value.active_base_point_id;
+      if (pid == null) { notifyError("Select a survey point first."); return; }
+      const gpsDevice = host.devices.selected("gps");
+      if (!gpsDevice) { notifyError("No GPS unit is configured."); return; }
+      await setGpsUnitMode("base", pid);
+      if (roverAvailable) {
+        // The rover pins public DNS, so it reaches the caster by tailnet IP.
+        const { host: casterHost, port, mountpoint } = gpsUnitConfig.value.caster || {};
+        if (!casterHost) throw new Error("The GPS unit has no tailnet address yet. Check its Tailscale connection.");
+        await setRoverCorrectionSource({ source: "caster", host: casterHost, port, mountpoint });
+      }
+      notifySuccess("Set the GPS unit as the base station.");
+    } else {
+      if (roverAvailable) await setRoverCorrectionSource({ source: "ngii" });
+      if (gpsUnitConfig.value.mode === "base") await setGpsUnitMode("capture", null);
+      notifySuccess("Switched corrections to NGII.");
+    }
   } catch (err) {
     notifyError(err.message || "Failed to change the GPS source.");
   } finally {
@@ -1087,6 +1166,8 @@ watch(baseState, (now, prev) => {
   // hits admin-only /api/gps/* (a non-admin would just get 403 + an error toast).
   if (prev === "surveying" && now !== "surveying" && canOperateRover.value) loadGps();
 });
+// The GPS unit's live marker follows its own status stream.
+watch(receiver, () => syncReceiverMarker());
 watch(receiverConnected, (now, prev) => {
   if (now && !prev && activeTab.value === "gps" && canOperateRover.value) loadGps();
 });
@@ -1202,8 +1283,8 @@ function onSheetTouchEnd() {
 let map = null;
 let markers = {};
 // One live marker per device — the rover (purple) and the GPS receiver (teal) —
-// so BOTH show at once when both are connected. position_source still governs
-// cone-capture priority and which one follow tracks.
+// so BOTH show at once when both are connected. positionSource governs
+// cone-capture priority; follow tracks the rover.
 let deviceMarkers = { rover: null, receiver: null };
 let surveyPointLayer = null;   // L.layerGroup of surveyed base-station point markers (GPS tab only)
 let pathLine = null;
@@ -2557,6 +2638,12 @@ async function saveCourseName(id) {
 
 async function deleteCourse(id) {
   const course = courses.value.find((c) => c.id === id);
+  // The rover keeps a copy of the mission route, but the operator still needs
+  // the course while that mission can run.
+  if (activeMission.value?.course_id === id) {
+    notifyError("A course used by an active mission cannot be deleted.");
+    return;
+  }
   if (!confirm(`Delete course "${course?.name}"?`)) return;
   try {
     await courseRequest(`/api/courses/${id}`, { method: "DELETE" });
@@ -3566,7 +3653,11 @@ function setDeviceMarker(kind, lat, lng) {
 function syncDeviceMarkers(s) {
   if (!s) return;
   setDeviceMarker("rover", s.last_position?.lat, s.last_position?.lng);
-  const rc = s.receiver;
+  syncReceiverMarker();
+}
+
+function syncReceiverMarker() {
+  const rc = receiver.value;
   const recv = rc && rc.mode === "capture" ? rc.last_position : null;
   setDeviceMarker("receiver", recv?.lat, recv?.lng);
 }
@@ -3612,8 +3703,7 @@ function renderSurveyPoints() {
   const layer = L.layerGroup();
   for (const p of surveyedPoints.value) {
     if (!isValidRoverPos(p.lat, p.lng)) continue;
-    const isBase = gpsConfig.value.ntrip_source === "base"
-      && gpsConfig.value.active_base_point_id === p.id;
+    const isBase = gpsConfig.value.active_base_point_id === p.id;
     const m = L.marker([p.lat, p.lng], {
       icon: surveyPointIcon(isBase, selectedSurveyPointId.value === p.id),
       zIndexOffset: 900, interactive: true, keyboard: false,
@@ -3633,13 +3723,16 @@ function renderSurveyPoints() {
 
 async function addConeFromRover() {
   if (!activeCourseId.value) return;
+  // Resolve the source once so the capture and the marker use the same device.
+  const source = positionSource.value;
+  if (!source) return;
   roverLoading.value = true;
   try {
-    const res = await roverRequest("/api/rover/request", { method: "POST" });
-    const { lat, lng, alt, source } = await res.json();
-    // Use the source the server actually answered from (not the live, possibly
-    // just-flipped position_source) so the cone lands on the right device marker.
-    setDeviceMarker(source === "receiver" ? "receiver" : "rover", lat, lng);
+    const res = source === "receiver"
+      ? await gpsRequest("/api/gps/capture", { method: "POST" })
+      : await roverRequest("/api/rover/request", { method: "POST" });
+    const { lat, lng, alt } = await res.json();
+    setDeviceMarker(source, lat, lng);
     await addCone(lat, lng, currentSide.value, alt);
   } catch (err) {
     notifyError(err.message || "Failed to get the rover position.");
@@ -4218,6 +4311,7 @@ async function syncMissionRemaining(mission, {
   const authorityToken = beginMissionAuthorityRequest(mission);
   const remaining = items || pathWaypoints.value.filter((waypoint) =>
     waypoint.state === "pending" || waypoint.state === "active");
+  assertRouteMatchesCourse(remaining, mission.course_id);
   const body = buildMissionRemainingPayload({
     draft,
     mission,
@@ -4394,6 +4488,17 @@ async function startExistingPath(opts = {}) {
   }
 }
 
+// Throws the same reason a course host reports for a stale route, so callers
+// reload the cones and ask the operator to review the route again.
+function assertRouteMatchesCourse(items, courseId) {
+  const mismatch = missionRouteCourseMismatch(items, conesMap.value[courseId] || []);
+  if (!mismatch) return;
+  throw Object.assign(new Error(`Cone ${mismatch.position + 1} changed after the preflight check. Review the latest route.`), {
+    status: 409,
+    data: { reason: "cone_snapshot_mismatch", ...mismatch },
+  });
+}
+
 async function executePath(opts = {}) {
   if (pathWaypoints.value.length === 0) return;
   executedIndex.value = 0;
@@ -4411,10 +4516,13 @@ async function executePath(opts = {}) {
   let authorityToken = null;
   try {
     authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
+    const course = courses.value.find((c) => c.id === activeCourseId.value);
+    if (!course) throw new Error("Course not found.");
+    assertRouteMatchesCourse(pathWaypoints.value, course.id);
     const createResponse = await roverRequest("/api/missions", {
       method: "POST",
       body: JSON.stringify(buildMissionCreatePayload({
-        courseId: activeCourseId.value,
+        course,
         finishBehavior: missionFinishBehavior.value,
         items: pathWaypoints.value,
         presetReference: pathPresetReference.value?.courseId === activeCourseId.value
@@ -4422,6 +4530,12 @@ async function executePath(opts = {}) {
       })),
     });
     const created = await createResponse.json();
+    // Keep the course as it was at mission creation, best effort: a host may not
+    // let this operator take snapshots, and the mission itself holds the route.
+    void courseRequest(`/api/courses/${course.id}/snapshots`, {
+      method: "POST",
+      body: JSON.stringify({ reason: `auto: create mission #${created.mission?.id ?? created.id}` }),
+    }).catch(() => {});
     const mission = resolveMissionHttpSnapshot(created, authorityToken, { expectedLocalMission: true });
     if (!mission) throw missionAuthorityAdvancedError(authorityToken);
     if (!missionCreateRouteAuthorityMatches({
@@ -4453,6 +4567,10 @@ async function executePath(opts = {}) {
       reconcileRoverMode(roverStatus.value);
     }
     notifyError(err.message);
+    if (err.data?.reason === "cone_snapshot_mismatch") {
+      await fetchAll();
+      if (map && !isMissionsView.value) rebuildAllMarkers();
+    }
   } finally {
     const settlement = missionCreateSettlementDecision({
       requestId: createRequestId,
@@ -4805,7 +4923,16 @@ function connectSSE() {
   watchLink(courseEvents, "course", () =>
     fetchAll().then(() => { if (map && !isMissionsView.value) rebuildAllMarkers(); }));
   if (roverEvents) watchLink(roverEvents, "rover", () => fetchRoverStatus());
-  if (gpsEvents) watchLink(gpsEvents, "gps", () => {});
+  if (gpsEvents) {
+    watchLink(gpsEvents, "gps", () => fetchGpsStatus());
+    gpsEvents.addEventListener("error", () => { gpsOnline.value = false; });
+    gpsEvents.addEventListener("gps:status", (e) => {
+      const data = parseSSE(e);
+      if (!data) return;
+      gpsStatus.value = data;
+      gpsOnline.value = true;
+    });
+  }
 
   courseEvents.addEventListener("init", (e) => {
     const data = parseSSE(e);
@@ -4860,14 +4987,9 @@ function connectSSE() {
   roverEvents?.addEventListener("rover", (e) => {
     const data = parseSSE(e);
     if (!data || !isValidRoverPos(data.lat, data.lng)) return;
-    // Move only this device's own marker (leaving the other device's in place).
-    const evSrc = data.source === "receiver" ? "receiver" : "rover";
-    setDeviceMarker(evSrc, data.lat, data.lng);
-    // Follow tracks the ROVER only — the receiver is a handheld, not a chase target.
-    if (followRover.value && evSrc === "rover") scheduleFollow(data.lat, data.lng);
-    // Mission path progress is a rover-only concern; a receiver capture position
-    // must not be mistaken for mission movement.
-    if (roverMode.value === "executing" && data.source !== "receiver") updatePathProgress(data.lat, data.lng);
+    setDeviceMarker("rover", data.lat, data.lng);
+    if (followRover.value) scheduleFollow(data.lat, data.lng);
+    if (roverMode.value === "executing") updatePathProgress(data.lat, data.lng);
   });
 
   roverEvents?.addEventListener("rover:status", (e) => {
@@ -5333,7 +5455,10 @@ onMounted(async () => {
   }
   recomputeCenterline(); // draw the restored course's centerline on first paint
   connectSSE();
-  if (canOperateRover.value) fetchRoverStatus();
+  if (canOperateRover.value) {
+    fetchRoverStatus();
+    fetchGpsStatus();
+  }
   // Prime the GPS-management tab if it's the persisted active tab on load.
   if (canOperateRover.value && activeTab.value === "gps") loadGps();
 });
@@ -5767,6 +5892,8 @@ onUnmounted(() => {
             </div>
           </template>
           </div>
+          <!-- Host-provided controls, e.g. the standalone console's settings. -->
+          <slot name="status-actions" />
           <button
             v-if="fullscreenSupported"
             class="fullscreen-btn"
@@ -6531,7 +6658,7 @@ onUnmounted(() => {
                     <div v-for="p in surveyPoints" :key="p.id"
                          :data-survey-id="p.id"
                          :class="['gps-point-card', {
-                           'is-base': gpsConfig.ntrip_source === 'base' && gpsConfig.active_base_point_id === p.id,
+                           'is-base': gpsConfig.active_base_point_id === p.id,
                            clickable: p.lat != null && p.lng != null,
                            selected: selectedSurveyPointId === p.id,
                          }]"
@@ -6539,7 +6666,7 @@ onUnmounted(() => {
                          @click="panToSurveyPoint(p)">
                       <div class="gps-point-head">
                         <strong class="gps-point-name">{{ p.name }}</strong>
-                        <span v-if="gpsConfig.ntrip_source === 'base' && gpsConfig.active_base_point_id === p.id" class="gps-tag gps-tag-base">Base station</span>
+                        <span v-if="gpsConfig.active_base_point_id === p.id" class="gps-tag gps-tag-base">Base station</span>
                         <span v-else-if="p.lat == null" class="gps-tag gps-tag-warn">Not surveyed</span>
                         <span v-else class="gps-tag gps-tag-ok">Surveyed</span>
                       </div>
@@ -6569,7 +6696,7 @@ onUnmounted(() => {
                                 :disabled="!receiverConnected || baseState !== 'idle'"
                                 @click.stop="startSurvey(p)">{{ p.lat != null ? 'Resurvey' : 'Survey' }}</button>
                         <button class="btn btn-ghost btn-sm gps-btn-danger"
-                                :disabled="gpsConfig.ntrip_source === 'base' && gpsConfig.active_base_point_id === p.id"
+                                :disabled="gpsConfig.active_base_point_id === p.id"
                                 @click.stop="deleteSurveyPoint(p)">Delete</button>
                       </div>
                     </div>

@@ -48,7 +48,23 @@ export function missionCommandTokenAfterSync({ routeAlreadySynced, preflightToke
   return routeAlreadySynced === true ? preflightToken : missionCommandToken(editedMission);
 }
 
-export function buildMissionCreatePayload({ courseId, finishBehavior, items, presetReference = null }) {
+// The rover keeps no course data, so the console confirms that every cone in the
+// route still matches the course before sending its geometry. Returns null when
+// the route matches, or the first mismatch { position, cone_id, current_cone }.
+export function missionRouteCourseMismatch(items, cones) {
+  const byId = new Map((cones || []).map((cone) => [cone.id, cone]));
+  for (const [position, item] of items.entries()) {
+    if (item.waypoint_id != null) continue;
+    const cone = byId.get(item.cone_id);
+    const sameAlt = (item.alt ?? null) === (cone?.alt ?? null);
+    if (!cone || cone.lat !== item.lat || cone.lng !== item.lng || !sameAlt || cone.side !== item.side) {
+      return { position, cone_id: item.cone_id ?? null, current_cone: cone || null };
+    }
+  }
+  return null;
+}
+
+export function buildMissionCreatePayload({ course, finishBehavior, items, presetReference = null }) {
   const coneIds = items.map((item) => item.cone_id);
   const presetMatches = presetReference
     && Number.isInteger(presetReference.id)
@@ -58,7 +74,7 @@ export function buildMissionCreatePayload({ courseId, finishBehavior, items, pre
     && presetReference.coneIds.length === coneIds.length
     && presetReference.coneIds.every((coneId, index) => coneId === coneIds[index]);
   return {
-    course_id: courseId,
+    course: { id: course.id, name: course.name },
     finish_behavior: finishBehavior,
     items: items.map((item) => ({
       cone_id: item.cone_id,
@@ -67,10 +83,7 @@ export function buildMissionCreatePayload({ courseId, finishBehavior, items, pre
       alt: item.alt ?? null,
       side: item.side ?? null,
     })),
-    ...(presetMatches ? {
-      preset_id: presetReference.id,
-      expected_preset_revision: presetReference.revision,
-    } : {}),
+    ...(presetMatches ? { preset_id: presetReference.id } : {}),
   };
 }
 

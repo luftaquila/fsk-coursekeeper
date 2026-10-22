@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   buildMissionCreatePayload,
+  missionRouteCourseMismatch,
   buildMissionCommandPayload,
   buildMissionPresetDeletePayload,
   buildMissionPresetPayload,
@@ -138,14 +139,30 @@ test("sends the plan and occurrence revisions captured at preflight", () => {
 
 test("sends the reviewed cone geometry when creating a mission", () => {
   assert.deepEqual(buildMissionCreatePayload({
-    courseId: 7,
+    course: { id: 7, name: "Autocross", reverse: 0 },
     finishBehavior: "return_to_start",
     items: [{ cone_id: 11, lat: 35.1, lng: 126.1, side: "right" }],
   }), {
-    course_id: 7,
+    course: { id: 7, name: "Autocross" },
     finish_behavior: "return_to_start",
     items: [{ cone_id: 11, lat: 35.1, lng: 126.1, alt: null, side: "right" }],
   });
+});
+
+test("detects route cones that no longer match the course", () => {
+  const cones = [
+    { id: 11, lat: 35.1, lng: 126.1, alt: null, side: "left" },
+    { id: 12, lat: 35.2, lng: 126.2, alt: 3.5, side: "right" },
+  ];
+  const route = [
+    { cone_id: 11, lat: 35.1, lng: 126.1, alt: null, side: "left" },
+    { waypoint_id: "kept-occurrence" },
+    { cone_id: 12, lat: 35.2, lng: 126.2, alt: 3.5, side: "right" },
+  ];
+  assert.equal(missionRouteCourseMismatch(route, cones), null);
+  const moved = [{ ...cones[0] }, { ...cones[1], lat: 35.21 }];
+  assert.deepEqual(missionRouteCourseMismatch(route, moved), { position: 2, cone_id: 12, current_cone: moved[1] });
+  assert.deepEqual(missionRouteCourseMismatch(route, [cones[1]]), { position: 0, cone_id: 11, current_cone: null });
 });
 
 test("keeps preset attribution only while the reviewed route still matches", () => {
@@ -162,16 +179,15 @@ test("keeps preset attribution only while the reviewed route still matches", () 
   ];
   const reference = missionPresetReference({ preset, items, finishBehavior: "stop" });
   assert.deepEqual(buildMissionCreatePayload({
-    courseId: 7,
+    course: { id: 7, name: "Autocross" },
     finishBehavior: "stop",
     items,
     presetReference: reference,
   }), {
-    course_id: 7,
+    course: { id: 7, name: "Autocross" },
     finish_behavior: "stop",
     items,
     preset_id: 4,
-    expected_preset_revision: "preset-at-read",
   });
   assert.equal(missionPresetReference({
     preset,
