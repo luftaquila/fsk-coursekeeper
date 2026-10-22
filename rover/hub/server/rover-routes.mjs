@@ -12,6 +12,7 @@ import {
   validateAltitude,
   validateCoordinate,
   validateNtripSource,
+  validateNtripUsername,
 } from "./validation.mjs";
 
 export const DEFAULT_MAX_WAYPOINT_DIST_M = 200;
@@ -34,6 +35,7 @@ const DEFAULT_DEVICE_STALE_MS = 15 * 1000;
 const DEFAULT_DEVICE_WATCHDOG_TICK_MS = 5 * 1000;
 const MOVING_MISSION_STATES = ["starting", "running", "pausing", "resuming"];
 const NTRIP_SOURCE_KEY = "ntrip_source";
+const NTRIP_USERNAME_KEY = "ntrip_username";
 const MISSION_LIST_MAX_LIMIT = 500;
 const MISSION_LIST_DEFAULT_LIMIT = 50;
 const MAX_ROVER_LOG_ENTRIES = 1000;
@@ -133,6 +135,21 @@ export function registerRoverRoutes({
   }
   let ntripSource = loadNtripSource();
 
+  function loadNtripUsername() {
+    const row = selectConfig.get(NTRIP_USERNAME_KEY);
+    if (!row) return "";
+    const checked = validateNtripUsername({ username: row.value });
+    if (checked.valid) return checked.value;
+    logger.warn(null, "rover.ntrip_username.invalid_stored", { error: checked.error }, "rover", SYSTEM_ACTOR);
+    return "";
+  }
+  let ntripUsername = loadNtripUsername();
+
+  // The rover gets the NGII login with the NGII source; a caster needs none.
+  function roverNtripSource() {
+    return ntripSource.source === "ngii" ? { ...ntripSource, username: ntripUsername } : ntripSource;
+  }
+
   /* ── Rover link ────────────────────────────────────── */
 
   function missionProtocol() {
@@ -152,6 +169,7 @@ export function registerRoverRoutes({
       ...roverState,
       device,
       ntrip_source: ntripSource,
+      ntrip_username: ntripUsername,
       // Shutdown may close SQLite just before a half-open stream's deferred
       // close or stale callback runs.
       active_mission_summary: db.open ? missionV2.activeMissionSummary() : null,
@@ -416,7 +434,7 @@ export function registerRoverRoutes({
     if (roverState.nav_lights_mode != null) sendRoverEvent("nav-lights", { mode: roverState.nav_lights_mode });
     if (roverState.led_brightness != null) sendRoverEvent("led-brightness", { brightness: roverState.led_brightness });
     if (roverState.pump_run_duration != null) sendRoverEvent("pump-duration", { seconds: roverState.pump_run_duration });
-    sendRoverEvent("ntrip-source", ntripSource);
+    sendRoverEvent("ntrip-source", roverNtripSource());
 
     if (roverProtocolVersion === MISSION_PROTOCOL_VERSION) {
       // A bridge/process boot identity change is a hard hold boundary. Usually
@@ -819,6 +837,7 @@ export function registerRoverRoutes({
       ...roverState,
       device,
       ntrip_source: ntripSource,
+      ntrip_username: ntripUsername,
       active_mission: missionV2.activeMission(),
       mission_protocol: missionProtocol(),
     });
@@ -844,10 +863,32 @@ export function registerRoverRoutes({
     }
     const before = ntripSource;
     ntripSource = next;
-    const delivered = sendRoverEvent("ntrip-source", next);
+    const delivered = sendRoverEvent("ntrip-source", roverNtripSource());
     logger.log(req, "rover.ntrip_source.update", { before, after: next, delivered }, "rover");
     broadcastRoverStatus();
     res.json(next);
+  });
+
+  // The NGII login is stored on the hub and sent with the NGII source. The log
+  // records whether it is set, not the login itself.
+  operatorApp.put("/api/rover/ntrip-username", (req, res) => {
+    const checked = validateNtripUsername(req.body);
+    if (!checked.valid) {
+      logger.warn(req, "rover.ntrip_username.update", { error: checked.error }, "rover");
+      return res.status(400).send(checked.error);
+    }
+    const next = checked.value;
+    const result = dbRun(() => upsertConfig.run(NTRIP_USERNAME_KEY, next, Date.now()));
+    if (!result.success) {
+      logger.warn(req, "rover.ntrip_username.update", { error: result.internalError || result.error }, "rover");
+      return res.status(result.status).send(result.error);
+    }
+    const changed = next !== ntripUsername;
+    ntripUsername = next;
+    const delivered = changed && ntripSource.source === "ngii" ? sendRoverEvent("ntrip-source", roverNtripSource()) : false;
+    logger.log(req, "rover.ntrip_username.update", { set: next !== "", changed, delivered }, "rover");
+    broadcastRoverStatus();
+    res.json({ username: next });
   });
 
   // Captures the rover's current RTK position for a cone.

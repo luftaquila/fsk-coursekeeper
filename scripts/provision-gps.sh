@@ -5,8 +5,8 @@
 # so this script also DEPLOYS the agent code.
 #
 # Usage:
-#   scripts/provision-gps.sh <host> [--ntrip-username=<id>] \
-#       [--allowed-origins=<origin,...>] [--tailscale-authkey=<tskey-...>]
+#   scripts/provision-gps.sh <host> [--allowed-origins=<origin,...>] \
+#       [--tailscale-authkey=<tskey-...>]
 #
 # What it does (idempotent):
 #   1. tars the GPS agent + the reused pilot.lib.* modules and copies them in,
@@ -21,7 +21,7 @@
 #   8. verifies the service stays active and the API answers.
 #
 # Re-running against the same unit is safe — files are overwritten, config is
-# rewritten (an omitted --ntrip-username keeps the unit's current value), and
+# rewritten (the NGII login lives in the unit's state, set from the console), and
 # apt/tailscale installs are no-ops when already present.
 
 set -eu
@@ -34,11 +34,9 @@ DEFAULT_ALLOWED_ORIGINS="https://luftaquila.github.io,https://fsk.luftaquila.io,
 
 usage() {
     cat >&2 <<EOF
-usage: $(basename "$0") <host> [--ntrip-username=<id>] [--allowed-origins=<origin,...>]
+usage: $(basename "$0") <host> [--allowed-origins=<origin,...>]
                         [--tailscale-authkey=<key>]
 
-  --ntrip-username     NGII login. Required on the first run; later runs keep
-                       the unit's current value when omitted.
   --allowed-origins    browser origins allowed by CORS
                        (default: $DEFAULT_ALLOWED_ORIGINS)
   --tailscale-authkey  bring Tailscale up with this key
@@ -49,12 +47,10 @@ EOF
 }
 
 HOST=""
-NTRIP_USER=""
 TS_AUTHKEY=""
 ALLOWED_ORIGINS="$DEFAULT_ALLOWED_ORIGINS"
 for arg in "$@"; do
     case "$arg" in
-        --ntrip-username=*)    NTRIP_USER="${arg#*=}" ;;
         --tailscale-authkey=*) TS_AUTHKEY="${arg#*=}" ;;
         --allowed-origins=*)   ALLOWED_ORIGINS="${arg#*=}" ;;
         -h|--help)             usage ;;
@@ -75,7 +71,6 @@ PILOT_LIB="$REPO_ROOT/rover/pilot/pilot/lib"
 
 printf 'provisioning fsk@%s (GPS unit)\n' "$HOST"
 printf '  hostname:        %s\n' "$GPS_HOSTNAME"
-printf '  NTRIP_USERNAME:  %s\n' "${NTRIP_USER:-(keep current)}"
 printf '  ALLOWED_ORIGINS: %s\n' "$ALLOWED_ORIGINS"
 printf '  API / caster:    127.0.0.1:%s / 127.0.0.1:%s/%s\n' "$API_PORT" "$CASTER_PORT" "$CASTER_MOUNTPOINT"
 printf '  Tailscale:       %s\n\n' "$([ -n "$TS_AUTHKEY" ] && echo 'up via auth key' || echo 'use the existing login')"
@@ -105,7 +100,6 @@ tar -cz -C "$STAGING" . | ssh $SSH_OPTS "fsk@$HOST" 'cat > /tmp/gps-deploy.tgz'
 #    body is quoted so nothing expands locally. Every command that could read
 #    stdin gets </dev/null so it cannot swallow the rest of this script.
 {
-    printf '%s\n' "$NTRIP_USER"
     printf '%s\n' "$TS_AUTHKEY"
     printf '%s\n' "$ALLOWED_ORIGINS"
     printf '%s\n' "$GPS_HOSTNAME"
@@ -118,14 +112,6 @@ CONF_DIR=/etc/fsk-coursekeeper-gps
 CONF="$CONF_DIR/gps.conf"
 OPT=/opt/fsk-coursekeeper-gps
 UNIT=fsk-coursekeeper-gps.service
-
-if [ -z "$NTRIP_USER" ] && sudo test -f "$CONF"; then
-    NTRIP_USER="$(sudo sed -n 's/^NTRIP_USERNAME=//p' "$CONF" </dev/null)"
-fi
-if [ -z "$NTRIP_USER" ]; then
-    echo "[gps] no NTRIP username on the unit yet — pass --ntrip-username=<id>" >&2
-    exit 1
-fi
 
 echo "[gps] installing python deps + tailscale"
 sudo apt-get update -qq </dev/null
@@ -190,10 +176,9 @@ rm -rf "$TMP" /tmp/gps-deploy.tgz
 
 echo "[gps] writing $CONF"
 sudo install -d -m 755 "$CONF_DIR"
-# 0600 root-owned: holds the NGII login. systemd reads it as EnvironmentFile.
+# 0600 root-owned; systemd reads it as EnvironmentFile.
 umask 077
 sudo tee "$CONF" >/dev/null <<EOF
-NTRIP_USERNAME=$NTRIP_USER
 API_PORT=$API_PORT
 CASTER_PORT=$CASTER_PORT
 CASTER_MOUNTPOINT=$CASTER_MOUNTPOINT
@@ -251,14 +236,13 @@ if [ "$TS_SERVE" = skipped ]; then
 fi
 REMOTE
 } | ssh $SSH_OPTS "fsk@$HOST" \
-    'IFS= read -r NTRIP_USER
-     IFS= read -r TS_AUTHKEY
+    'IFS= read -r TS_AUTHKEY
      IFS= read -r ALLOWED_ORIGINS
      IFS= read -r GPS_HOSTNAME
      IFS= read -r API_PORT
      IFS= read -r CASTER_PORT
      IFS= read -r CASTER_MOUNTPOINT
-     export NTRIP_USER TS_AUTHKEY ALLOWED_ORIGINS GPS_HOSTNAME API_PORT CASTER_PORT CASTER_MOUNTPOINT
+     export TS_AUTHKEY ALLOWED_ORIGINS GPS_HOSTNAME API_PORT CASTER_PORT CASTER_MOUNTPOINT
      sh -s'
 
 printf '\nprovisioning complete. Tail logs with:\n'

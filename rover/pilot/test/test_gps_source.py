@@ -15,6 +15,7 @@ from pilot.gps_node import GpsNode, NGII_SOURCE, ntrip_setup_due
 from pilot.lib.ubx_parser import FixType
 
 CASTER = {"source": "caster", "host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"}
+NGII_USER = {"source": "ngii", "username": "user"}
 
 
 class _CapturingSerial:
@@ -64,23 +65,23 @@ def _pvt(fix_type=FixType.FIX_3D):
 
 class TestSetupDecision:
     def test_waits_for_3d_fix(self):
-        assert not ntrip_setup_due(CASTER, "", False, FixType.FIX_2D, 100.0, 0.0)
-        assert ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 0.0)
+        assert not ntrip_setup_due(CASTER, False, FixType.FIX_2D, 100.0, 0.0)
+        assert ntrip_setup_due(CASTER, False, FixType.FIX_3D, 100.0, 0.0)
 
     def test_ngii_needs_username_caster_does_not(self):
-        assert not ntrip_setup_due(NGII_SOURCE, "", False, FixType.FIX_3D, 100.0, 0.0)
-        assert ntrip_setup_due(NGII_SOURCE, "user", False, FixType.FIX_3D, 100.0, 0.0)
-        assert ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 0.0)
+        assert not ntrip_setup_due(NGII_SOURCE, False, FixType.FIX_3D, 100.0, 0.0)
+        assert ntrip_setup_due(NGII_USER, False, FixType.FIX_3D, 100.0, 0.0)
+        assert ntrip_setup_due(CASTER, False, FixType.FIX_3D, 100.0, 0.0)
 
     def test_existing_client_or_cooldown_blocks(self):
-        assert not ntrip_setup_due(CASTER, "", True, FixType.FIX_3D, 100.0, 0.0)
-        assert not ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 90.0, cooldown_s=30.0)
-        assert ntrip_setup_due(CASTER, "", False, FixType.FIX_3D, 100.0, 70.0, cooldown_s=30.0)
+        assert not ntrip_setup_due(CASTER, True, FixType.FIX_3D, 100.0, 0.0)
+        assert not ntrip_setup_due(CASTER, False, FixType.FIX_3D, 100.0, 90.0, cooldown_s=30.0)
+        assert ntrip_setup_due(CASTER, False, FixType.FIX_3D, 100.0, 70.0, cooldown_s=30.0)
 
 
 class TestSourceSwitch:
     def test_default_source_is_ngii(self):
-        assert _node()._ntrip_source == {"source": "ngii"}
+        assert _node()._ntrip_source == {"source": "ngii", "username": ""}
 
     def test_switch_to_caster(self):
         node = _node()
@@ -94,6 +95,7 @@ class TestSourceSwitch:
         json.dumps({**CASTER, "port": "2101"}),
         json.dumps({**CASTER, "mountpoint": "A B"}),
         json.dumps({"source": "caster", "port": 2101, "mountpoint": "FSKBASE"}),
+        json.dumps({"source": "ngii", "username": "a b"}),
     ])
     def test_malformed_selector_keeps_current_source(self, data):
         node = _node()
@@ -117,6 +119,15 @@ class TestSourceSwitch:
         assert client.stopped is True and node._ntrip is None
         assert node._ntrip_source["host"] == "100.64.0.8"
 
+    def test_new_ngii_login_restarts_the_client(self):
+        node = _node()
+        node._on_ntrip_source(_msg(NGII_USER))
+        client = _FakeClient()
+        node._ntrip = client
+        node._on_ntrip_source(_msg({"source": "ngii", "username": "other"}))
+        assert client.stopped is True and node._ntrip is None
+        assert node._ntrip_source == {"source": "ngii", "username": "other"}
+
     def test_same_source_keeps_the_client(self):
         node = _node()
         node._on_ntrip_source(_msg(CASTER))
@@ -136,7 +147,7 @@ class TestSetupWorker:
 
         monkeypatch.setattr(gps_node_mod, "fetch_source_table", _boom)
         monkeypatch.setattr(gps_node_mod, "NTRIPClient", _FakeClient)
-        node._ntrip_setup_worker(37.5, 127.0, node._ntrip_source, "", 10.0, node._serial)
+        node._ntrip_setup_worker(37.5, 127.0, node._ntrip_source, 10.0, node._serial)
         client = node._ntrip
         assert client.started is True
         assert client.kwargs["host"] == "100.64.0.7" and client.kwargs["port"] == 2101
@@ -147,10 +158,11 @@ class TestSetupWorker:
 
     def test_ngii_uses_the_nearest_mountpoint(self, monkeypatch):
         node = _node()
+        node._on_ntrip_source(_msg(NGII_USER))
         table = "STR;NEAR;x;RTCM 3.2;;;;;;37.50;127.00;\r\nSTR;FAR;x;RTCM 3.2;;;;;;35.00;129.00;\r\n"
         monkeypatch.setattr(gps_node_mod, "fetch_source_table", lambda *_a, **_kw: table)
         monkeypatch.setattr(gps_node_mod, "NTRIPClient", _FakeClient)
-        node._ntrip_setup_worker(37.5, 127.0, node._ntrip_source, "user", 10.0, node._serial)
+        node._ntrip_setup_worker(37.5, 127.0, node._ntrip_source, 10.0, node._serial)
         assert node._ntrip.kwargs["mountpoint"] == "NEAR"
         assert node._ntrip.kwargs["username"] == "user"
         assert node._ntrip.kwargs["password"] == "gnss"
@@ -166,7 +178,7 @@ class TestSetupWorker:
             raise AssertionError("must not fetch for a stale source")
 
         monkeypatch.setattr(gps_node_mod, "fetch_source_table", _boom)
-        node._ntrip_setup_worker(37.5, 127.0, stale, "user", 10.0, node._serial)
+        node._ntrip_setup_worker(37.5, 127.0, stale, 10.0, node._serial)
         assert node._ntrip is None
 
     def test_switch_during_fetch_is_not_overridden(self, monkeypatch):
@@ -179,7 +191,7 @@ class TestSetupWorker:
 
         monkeypatch.setattr(gps_node_mod, "fetch_source_table", _fetch)
         monkeypatch.setattr(gps_node_mod, "NTRIPClient", _FakeClient)
-        node._ntrip_setup_worker(37.5, 127.0, stale, "user", 10.0, node._serial)
+        node._ntrip_setup_worker(37.5, 127.0, stale, 10.0, node._serial)
         assert node._ntrip is None
 
     def test_maybe_setup_spawns_caster_without_username(self, monkeypatch):

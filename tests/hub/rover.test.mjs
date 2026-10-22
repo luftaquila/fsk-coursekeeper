@@ -86,7 +86,8 @@ describe("hub apps", () => {
   it("keeps operator routes off the device app", async () => {
     for (const [method, path] of [
       ["GET", "/api/rover/status"], ["GET", "/api/events"], ["GET", "/api/rover/ntrip-source"],
-      ["PUT", "/api/rover/ntrip-source"], ["GET", "/api/rover/logs"], ["POST", "/api/rover/logs/fetch"],
+      ["PUT", "/api/rover/ntrip-source"], ["PUT", "/api/rover/ntrip-username"],
+      ["GET", "/api/rover/logs"], ["POST", "/api/rover/logs/fetch"],
       ["POST", "/api/rover/request"], ["POST", "/api/rover/stop"], ["POST", "/api/rover/clear-emergency"],
       ["POST", "/api/rover/control"], ["POST", "/api/rover/pump"], ["POST", "/api/rover/pump-duration"],
       ["POST", "/api/rover/nav-lights"], ["POST", "/api/rover/led-brightness"],
@@ -433,7 +434,7 @@ describe("operator commands without a rover", () => {
       assert.deepEqual((await rover.waitFor("nav-lights")).data, { mode: 4 });
       assert.deepEqual((await rover.waitFor("led-brightness")).data, { brightness: 40 });
       assert.deepEqual((await rover.waitFor("pump-duration")).data, { seconds: 3.5 });
-      assert.deepEqual((await rover.waitFor("ntrip-source")).data, { source: "ngii" });
+      assert.deepEqual((await rover.waitFor("ntrip-source")).data, { source: "ngii", username: "" });
       assert.deepEqual((await rover.waitFor("mission-state-request")).data, { protocol_version: 2 });
     });
   });
@@ -968,7 +969,7 @@ describe("rover NTRIP correction source", () => {
       assert.deepEqual((await local.status()).ntrip_source, { source: "ngii" });
 
       const rover = await local.openRover("boot-ntrip");
-      assert.deepEqual((await rover.waitFor("ntrip-source")).data, { source: "ngii" });
+      assert.deepEqual((await rover.waitFor("ntrip-source")).data, { source: "ngii", username: "" });
       const events = await local.openEvents();
       const caster = { source: "caster", host: "gps-unit.tail1234.ts.net", port: 2101, mountpoint: "FSK_BASE-1" };
       const pushed = rover.waitFor("ntrip-source", (data) => data.source === "caster");
@@ -1006,6 +1007,70 @@ describe("rover NTRIP correction source", () => {
       assert.equal(JSON.parse(log.detail).delivered, false);
       const rover = await local.openRover("boot-offline-ntrip");
       assert.deepEqual((await rover.waitFor("ntrip-source")).data, caster);
+    });
+  });
+});
+
+describe("rover NGII login", () => {
+  it("rejects logins the NTRIP client cannot send", async () => {
+    await withHub(async (local) => {
+      for (const body of [{}, { username: 5 }, { username: "a b" }, { username: "user:pass" }, { username: "user\n" },
+        { username: "x".repeat(129) }, { username: "로그인" }, []]) {
+        const res = await local.operator.json("PUT", "/api/rover/ntrip-username", body);
+        assert.equal(res.status, 400, JSON.stringify(body));
+      }
+      const longest = await local.operator.json("PUT", "/api/rover/ntrip-username", { username: "x".repeat(128) });
+      assert.equal(longest.status, 200);
+    });
+  });
+
+  it("persists the login, reports it in status, and sends it with the NGII source", async () => {
+    const dbPath = tmpDbPath();
+    let local = await startHub({ dbPath });
+    try {
+      assert.equal((await local.status()).ntrip_username, "");
+      const rover = await local.openRover("boot-login");
+      assert.deepEqual((await rover.waitFor("ntrip-source")).data, { source: "ngii", username: "" });
+
+      const events = await local.openEvents();
+      const pushed = rover.waitFor("ntrip-source", (data) => data.username === "me@example.com");
+      const broadcast = events.waitFor("rover:status", (data) => data.ntrip_username === "me@example.com");
+      const put = await local.operator.json("PUT", "/api/rover/ntrip-username", { username: "me@example.com" });
+      assert.equal(put.status, 200);
+      assert.deepEqual(put.data, { username: "me@example.com" });
+      assert.deepEqual((await pushed).data, { source: "ngii", username: "me@example.com" });
+      await broadcast;
+      assert.equal((await local.operator.json("GET", "/api/rover/status")).data.ntrip_username, "me@example.com");
+      // The NGII source the operator sees carries no login; the log records only that one is set.
+      assert.deepEqual((await local.operator.json("GET", "/api/rover/ntrip-source")).data, { source: "ngii" });
+      const log = local.db.prepare("SELECT detail FROM logs WHERE action='rover.ntrip_username.update' AND level='info'").get();
+      assert.deepEqual(JSON.parse(log.detail), { set: true, changed: true, delivered: true });
+      await local.stop({ keepDb: true });
+
+      local = await startHub({ dbPath });
+      assert.equal((await local.status()).ntrip_username, "me@example.com");
+      const afterRestart = await local.openRover("boot-login-2");
+      assert.deepEqual((await afterRestart.waitFor("ntrip-source")).data, { source: "ngii", username: "me@example.com" });
+    } finally {
+      await local.stop({ keepDb: true });
+      cleanupDb(dbPath);
+    }
+  });
+
+  it("keeps the login while a caster is the source and sends none to it", async () => {
+    await withHub(async (local) => {
+      const caster = { source: "caster", host: "10.0.0.5", port: 2101, mountpoint: "BASE" };
+      assert.equal((await local.operator.json("PUT", "/api/rover/ntrip-source", caster)).status, 200);
+      const rover = await local.openRover("boot-login-caster");
+      assert.deepEqual((await rover.waitFor("ntrip-source")).data, caster);
+      const put = await local.operator.json("PUT", "/api/rover/ntrip-username", { username: "user" });
+      assert.equal(put.status, 200);
+      const log = local.db.prepare("SELECT detail FROM logs WHERE action='rover.ntrip_username.update' AND level='info'").get();
+      assert.equal(JSON.parse(log.detail).delivered, false);
+
+      const pushed = rover.waitFor("ntrip-source", (data) => data.source === "ngii");
+      assert.equal((await local.operator.json("PUT", "/api/rover/ntrip-source", { source: "ngii" })).status, 200);
+      assert.deepEqual((await pushed).data, { source: "ngii", username: "user" });
     });
   });
 });

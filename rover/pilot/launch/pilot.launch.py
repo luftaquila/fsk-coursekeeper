@@ -5,8 +5,9 @@ watchdog) plus the mission-specific peristaltic pump (GP6, IRLZ44N
 MOSFET) all live on the RP2040 coprocessor (`rover/mcu/`); the Pi
 drives no GPIO. The Pi runs five ROS 2 nodes: gps, navigator,
 mcu_bridge, spray, bridge (rover hub).
-Secrets (NTRIP credentials, optional INTERNAL_SECRET/ROVER_SECRET) come
-from the environment only — never on the ROS param tree.
+Optional INTERNAL_SECRET/ROVER_SECRET come from the environment only —
+never on the ROS param tree. The NGII login arrives from the hub at runtime
+(/rover/cmd/ntrip_source).
 """
 
 import os
@@ -33,13 +34,9 @@ def generate_launch_description():
 
     config_file = LaunchConfiguration('config_file')
 
-    ntrip_overrides = {}
-    if os.environ.get('NTRIP_USERNAME'):
-        ntrip_overrides['ntrip.username'] = os.environ['NTRIP_USERNAME']
-
     gps_node = Node(
         package='pilot', executable='gps_node', name='gps_node',
-        parameters=[config_file, ntrip_overrides] if ntrip_overrides else [config_file],
+        parameters=[config_file],
         output='screen',
     )
 

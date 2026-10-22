@@ -226,8 +226,10 @@ _CASTER = {"source": "caster", "host": "100.64.0.7", "port": 2101, "mountpoint":
 
 
 def test_parse_ntrip_source_ngii_from_dict_and_json():
-    assert parse_ntrip_source({"source": "ngii", "extra": 1}) == {"source": "ngii"}
-    assert parse_ntrip_source('{"source":"ngii"}') == {"source": "ngii"}
+    assert parse_ntrip_source({"source": "ngii", "extra": 1}) == {"source": "ngii", "username": ""}
+    assert parse_ntrip_source('{"source":"ngii"}') == {"source": "ngii", "username": ""}
+    assert parse_ntrip_source({"source": "ngii", "username": "me@example.com"}) == {
+        "source": "ngii", "username": "me@example.com"}
 
 
 def test_parse_ntrip_source_caster_drops_unknown_keys():
@@ -248,6 +250,12 @@ def test_parse_ntrip_source_caster_drops_unknown_keys():
     {**_CASTER, "mountpoint": ""},
     {**_CASTER, "mountpoint": "A B"},
     {**_CASTER, "mountpoint": "../x HTTP/1.1"},
+    {"source": "ngii", "username": "a b"},
+    {"source": "ngii", "username": "user:pass"},
+    {"source": "ngii", "username": "user\n"},
+    {"source": "ngii", "username": "x" * 129},
+    {"source": "ngii", "username": None},
+    {"source": "ngii", "username": "로그인"},
 ])
 def test_parse_ntrip_source_rejects(value):
     with pytest.raises(ValueError):

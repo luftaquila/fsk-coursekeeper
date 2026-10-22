@@ -15,17 +15,14 @@ gps_node:
     baud_rate: 115200
     publish_rate: 10.0                 # Hz
     heading_speed_threshold: 1.5       # m/s minimum to publish heading-of-motion. At 1.5 m/s, atan2 over a 15 cm displacement with ±1 cm RTK noise gives ±5° heading noise — fusable with a low gain. Below 1.5 m/s the noise exceeds ±8° and gets DROPPED entirely; chassis_psi at low speed is maintained by wheel-encoder yaw rate (predict) and the position-innovation ψ correction (estimator.correct_position_with_yaw_innovation), which is what ArduPilot EKF3 does on single-antenna RTK rovers without an IMU. Aligned with estimator_psi_min_speed.
-    # NOTE: the NTRIP username MUST be injected via the NTRIP_USERNAME env
-    # var (sourced from a podman secret in the rover image), never committed
-    # to this file. Leave blank here so the repo stays safe to publish.
     ntrip:
       # Default correction source is NGII (www.gnssdata.or.kr:2101), whose
       # host/port and shared password "gnss" are constants in gps_node.py;
-      # only the per-operator username is configurable, and the mountpoint is
-      # auto-selected by nearest-base-station lookup in its source table. The
-      # hub can switch the source to a GPS unit's base-station caster
-      # (/rover/cmd/ntrip_source), which needs no username.
-      username: ""
+      # the mountpoint is auto-selected by nearest-base-station lookup in its
+      # source table. The operator's NGII login is set in the console and
+      # arrives from the hub with the source (/rover/cmd/ntrip_source); the
+      # hub can also switch to a GPS unit's base-station caster, which needs
+      # no login.
       gga_interval_s: 10.0             # Seconds between GGA heartbeats to the caster
 
 navigator_node:

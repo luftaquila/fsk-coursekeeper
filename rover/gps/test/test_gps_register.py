@@ -662,9 +662,36 @@ class TestConfig:
     def test_default(self, make_agent):
         agent, _, _ = make_agent()
         assert agent.get_config() == {
-            "mode": "capture", "active_base_point_id": None,
+            "mode": "capture", "active_base_point_id": None, "ntrip_username": "user",
             "caster": {"host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"},
         }
+
+    def test_ntrip_username_persists_and_restarts_ngii(self, make_agent, tmp_path):
+        agent, _, _ = make_agent(ntrip_username="")
+        assert agent.get_config()["ntrip_username"] == ""
+
+        class _Client:
+            stopped = False
+
+            def stop(self):
+                self.stopped = True
+
+        client = _Client()
+        agent._ntrip = client
+        agent._ntrip_last_attempt = 123.0
+        cfg = agent.set_ntrip_username("me@example.com")
+        assert cfg["ntrip_username"] == "me@example.com"
+        assert client.stopped and agent._ntrip is None and agent._ntrip_last_attempt == 0.0
+        assert json.loads((tmp_path / "state.json").read_text())["ntrip_username"] == "me@example.com"
+        rebooted, _, _ = make_agent(ntrip_username="")
+        assert rebooted._ntrip_username == "me@example.com"
+
+    @pytest.mark.parametrize("username", [None, 5, "a b", "user:pass", "user\n", "x" * 129, "로그인"])
+    def test_ntrip_username_invalid(self, make_agent, username):
+        agent, _, _ = make_agent()
+        err = _api_error(agent.set_ntrip_username, username)
+        assert (err.status, err.reason) == (400, "invalid_username")
+        assert agent._ntrip_username == "user"
 
     @pytest.mark.parametrize("body,status,reason", [
         ({}, 400, "invalid_mode"),
@@ -748,6 +775,8 @@ class TestStateFile:
         json.dumps([1, 2]),
         json.dumps({"mode": "capture", "active_base_point_id": None,
                     "next_point_id": 1, "points": [{"id": 1, "name": "dup-id-past-next"}]}),
+        json.dumps({"mode": "capture", "active_base_point_id": None,
+                    "next_point_id": 1, "points": [], "ntrip_username": "a b"}),
     ])
     def test_unusable_file_is_moved_aside(self, tmp_path, content):
         path = tmp_path / "state.json"

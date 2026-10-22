@@ -494,9 +494,9 @@ def test_ntrip_source_caster_is_republished_as_json():
     node._pub_ntrip_source = _RecordingPub()
     source = {"source": "caster", "host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"}
     node._handle_sse_event('ntrip-source', json.dumps({**source, "extra": 1}))
-    node._handle_sse_event('ntrip-source', json.dumps({"source": "ngii"}))
+    node._handle_sse_event('ntrip-source', json.dumps({"source": "ngii", "username": "user"}))
     assert [json.loads(m.data) for m in node._pub_ntrip_source.published] == [
-        source, {"source": "ngii"}]
+        source, {"source": "ngii", "username": "user"}]
 
 
 @pytest.mark.parametrize("payload", [

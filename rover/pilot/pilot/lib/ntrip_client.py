@@ -118,12 +118,21 @@ def select_nearest_mountpoint(lat, lon, entries, format_prefix="RTCM 3.2"):
 # hostname/IPv4 and mountpoint characters are accepted.
 _SOURCE_HOST_RE = re.compile(r"^[A-Za-z0-9.-]{1,253}$")
 _SOURCE_MOUNTPOINT_RE = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+# NGII login, set from the console. Printable ASCII without spaces or the
+# colon that separates it from the password in HTTP basic auth; "" = unset.
+_NTRIP_USERNAME_RE = re.compile(r"^[!-9;-~]{0,128}$")
+
+
+def valid_ntrip_username(value):
+    """True for an NGII login the NTRIP client can send ("" means unset)."""
+    return isinstance(value, str) and bool(_NTRIP_USERNAME_RE.fullmatch(value))
 
 
 def parse_ntrip_source(value):
     """Validate a correction-source selector (a dict or its JSON text).
 
-    Returns ``{"source": "ngii"}`` (public NGII caster, nearest mountpoint) or
+    Returns ``{"source": "ngii", "username"}`` (public NGII caster, nearest
+    mountpoint; username "" when no login is set) or
     ``{"source": "caster", "host", "port", "mountpoint"}`` (a GPS unit's base
     caster). Raises ValueError naming the problem; unknown keys are dropped.
     """
@@ -136,7 +145,10 @@ def parse_ntrip_source(value):
         raise ValueError("not a JSON object")
     source = value.get("source")
     if source == "ngii":
-        return {"source": "ngii"}
+        username = value.get("username", "")
+        if not valid_ntrip_username(username):
+            raise ValueError("invalid NGII username")
+        return {"source": "ngii", "username": username}
     if source != "caster":
         raise ValueError(f"unknown source {source!r}")
     host = value.get("host")

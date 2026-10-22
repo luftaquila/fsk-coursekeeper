@@ -253,6 +253,8 @@ const roverStatus = ref({
   // The rover's correction source: { source: "ngii" } or
   // { source: "caster", host, port, mountpoint } (a GPS unit base station).
   ntrip_source: { source: "ngii" },
+  // The NGII login the hub sends with the NGII source ("" = unset).
+  ntrip_username: "",
   active_mission: null,
   mission_protocol: { required: 2, connected: null, compatible: false, boot_id: null },
 });
@@ -911,7 +913,7 @@ watch(inspectorWidth, (v) => savePref("inspectorWidth", v));
 
 /* ── GPS 관리 (수신기 소스 선택 + base station 측량점) ─────────────────── */
 // The GPS unit's own mode; the rover's correction source lives on the rover.
-const gpsUnitConfig = ref({ mode: "capture", active_base_point_id: null, caster: null });
+const gpsUnitConfig = ref({ mode: "capture", active_base_point_id: null, ntrip_username: "", caster: null });
 // What the GPS tab shows: "base" while the rover takes corrections from the
 // unit's caster; the active point only while the unit is a base station.
 const gpsConfig = computed(() => ({
@@ -1069,6 +1071,34 @@ async function loadGps() {
     surveyPoints.value = await spRes.json();
   } catch (err) {
     notifyError(err.message || "Failed to load GPS settings.");
+  }
+}
+
+// NGII logins, one per device. Each field follows the device's saved value and
+// is sent when the operator saves it ("" clears the login).
+const roverNgiiLogin = ref("");
+const gpsNgiiLogin = ref("");
+const ngiiLoginSaving = ref(false);
+watch(() => roverStatus.value.ntrip_username, (v) => { roverNgiiLogin.value = v ?? ""; }, { immediate: true });
+watch(() => gpsUnitConfig.value.ntrip_username, (v) => { gpsNgiiLogin.value = v ?? ""; }, { immediate: true });
+
+async function saveNgiiLogin(kind) {
+  const username = (kind === "rover" ? roverNgiiLogin : gpsNgiiLogin).value.trim();
+  ngiiLoginSaving.value = true;
+  try {
+    if (kind === "rover") {
+      const res = await roverRequest("/api/rover/ntrip-username", { method: "PUT", body: JSON.stringify({ username }) });
+      roverStatus.value = { ...roverStatus.value, ntrip_username: (await res.json()).username };
+    } else {
+      const res = await gpsRequest("/api/gps/ntrip-username", { method: "PUT", body: JSON.stringify({ username }) });
+      gpsUnitConfig.value = await res.json();
+    }
+    const device = kind === "rover" ? "rover" : "GPS unit";
+    notifySuccess(username ? `Saved the ${device}'s NGII login.` : `Cleared the ${device}'s NGII login.`);
+  } catch (err) {
+    notifyError(err.message || "Failed to save the NGII login.");
+  } finally {
+    ngiiLoginSaving.value = false;
   }
 }
 
@@ -6610,6 +6640,18 @@ onUnmounted(() => {
                     :disabled="!receiverCanTrack"
                     @click="toggleFollowReceiver"
                   >Follow GPS unit</button>
+                  <div class="gps-login">
+                    <label for="gps-ngii-login">NGII login</label>
+                    <div class="gps-add-row">
+                      <input id="gps-ngii-login" v-model="gpsNgiiLogin" type="text" maxlength="128"
+                             autocomplete="off" spellcheck="false" placeholder="NGII account ID"
+                             :disabled="!receiver?.online || ngiiLoginSaving" @keyup.enter="saveNgiiLogin('gps')" />
+                      <button class="btn btn-primary btn-sm"
+                              :disabled="!receiver?.online || ngiiLoginSaving || gpsNgiiLogin.trim() === (gpsUnitConfig.ntrip_username ?? '')"
+                              @click="saveNgiiLogin('gps')">Save</button>
+                    </div>
+                    <div class="gps-sub">Needed for RTK and for surveying base station positions</div>
+                  </div>
                 </div>
 
                 <!-- NTRIP source selection -->
@@ -6635,6 +6677,17 @@ onUnmounted(() => {
                         <div class="gps-sub">Uses the GPS unit placed on a survey point as a fixed base station</div>
                       </div>
                     </label>
+                  </div>
+                  <div v-if="gpsConfig.ntrip_source === 'ngii'" class="gps-login">
+                    <label for="rover-ngii-login">Rover NGII login</label>
+                    <div class="gps-add-row">
+                      <input id="rover-ngii-login" v-model="roverNgiiLogin" type="text" maxlength="128"
+                             autocomplete="off" spellcheck="false" placeholder="NGII account ID"
+                             :disabled="!host.devices.transport('rover') || ngiiLoginSaving" @keyup.enter="saveNgiiLogin('rover')" />
+                      <button class="btn btn-primary btn-sm"
+                              :disabled="!host.devices.transport('rover') || ngiiLoginSaving || roverNgiiLogin.trim() === (roverStatus.ntrip_username ?? '')"
+                              @click="saveNgiiLogin('rover')">Save</button>
+                    </div>
                   </div>
                   <div v-if="gpsConfig.ntrip_source === 'base'" class="gps-base-select">
                     <label>Base point</label>
@@ -8034,6 +8087,8 @@ onUnmounted(() => {
 .gps-source-opt.disabled { opacity: 0.55; cursor: not-allowed; }
 .gps-source-opt input { margin-top: 0.2rem; }
 .gps-base-select { display: flex; align-items: center; gap: 0.5rem; margin-top: 0.6rem; }
+.gps-login { display: flex; flex-direction: column; gap: 0.3rem; margin-top: 0.6rem; }
+.gps-login label { font-size: 0.75rem; color: var(--text-secondary); }
 .gps-add-row { display: flex; gap: 0.5rem; }
 /* Match the course-add input styling; min-width:0 lets flex items shrink so a
    long placeholder doesn't push the row past the inspector panel edge. */

@@ -184,7 +184,7 @@ class TestEndpoints:
         status, _, cfg = call(server, "PUT", "/api/gps/config",
                               {"mode": "base", "active_base_point_id": point["id"]})
         assert status == 200
-        assert cfg == {"mode": "base", "active_base_point_id": point["id"],
+        assert cfg == {"mode": "base", "active_base_point_id": point["id"], "ntrip_username": "user",
                        "caster": {"host": "100.64.0.7", "port": 2101, "mountpoint": "FSKBASE"}}
         assert caster.active is True
         status, _, body = call(server, "DELETE", f"/api/gps/survey-points/{point['id']}")
@@ -196,6 +196,16 @@ class TestEndpoints:
         assert caster.active is False
         status, _, cfg = call(server, "GET", "/api/gps/config")
         assert cfg["mode"] == "capture"
+
+    def test_ntrip_username(self, api):
+        server, agent, _ = api
+        status, _, cfg = call(server, "PUT", "/api/gps/ntrip-username", {"username": "me@example.com"})
+        assert status == 200 and cfg["ntrip_username"] == "me@example.com"
+        assert agent._ntrip_username == "me@example.com"
+        status, _, body = call(server, "PUT", "/api/gps/ntrip-username", {"username": "a b"})
+        assert status == 400 and body["reason"] == "invalid_username"
+        status, _, body = call(server, "PUT", "/api/gps/ntrip-username", {})
+        assert status == 400 and body["reason"] == "invalid_username"
 
     def test_capture_failure_is_422(self, api, monkeypatch):
         server, _, _ = api

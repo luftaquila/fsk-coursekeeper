@@ -35,6 +35,16 @@ export const CONE_SIDES = new Set(["left", "right", "center"]);
 
 export const DEFAULT_NTRIP_SOURCE = Object.freeze({ source: "ngii" });
 
+// The operator's NGII login. Printable ASCII without spaces or the colon that
+// separates it from the password in HTTP basic auth; "" clears it.
+export function validateNtripUsername(body) {
+  const username = body && typeof body === "object" && !Array.isArray(body) ? body.username : undefined;
+  if (typeof username !== "string" || !/^[!-9;-~]{0,128}$/.test(username)) {
+    return { valid: false, error: "username must be up to 128 printable ASCII characters without spaces or colons." };
+  }
+  return { valid: true, value: username };
+}
+
 // The rover's RTK correction source: the NGII network (mountpoint chosen by the
 // rover) or a specific caster, typically the handheld GPS unit's base station.
 export function validateNtripSource(body) {

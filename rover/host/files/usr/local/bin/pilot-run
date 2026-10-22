@@ -64,6 +64,5 @@ exec podman run \
     --volume /var/lib/pilot:/var/lib/pilot:Z \
     --env-file /etc/pilot/pilot.conf \
     --secret internal-secret,type=env,target=INTERNAL_SECRET \
-    --secret ntrip-username,type=env,target=NTRIP_USERNAME \
     "${ROVER_SECRET_ARGS[@]}" \
     "$IMAGE"

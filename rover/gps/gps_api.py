@@ -140,6 +140,7 @@ _ROUTES = [
     ("POST", re.compile(r"^/api/gps/survey-points/(\d+)/survey/cancel$"), "_cancel_survey"),
     ("GET", re.compile(r"^/api/gps/config$"), "_get_config"),
     ("PUT", re.compile(r"^/api/gps/config$"), "_put_config"),
+    ("PUT", re.compile(r"^/api/gps/ntrip-username$"), "_put_ntrip_username"),
 ]
 
 
@@ -306,6 +307,10 @@ class _Handler(BaseHTTPRequestHandler):
     def _put_config(self):
         body = self._read_json()
         self._send(200, self._ctx.agent.set_config(body, self._actor()))
+
+    def _put_ntrip_username(self):
+        body = self._read_json()
+        self._send(200, self._ctx.agent.set_ntrip_username(body.get("username"), self._actor()))
 
     def _events(self):
         ctx = self._ctx

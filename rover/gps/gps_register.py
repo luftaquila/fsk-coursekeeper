@@ -16,11 +16,11 @@ ROS:
 It reuses the pilot's pure, ROS-free modules (UBX parser, NTRIP client, geo
 utils, RTCM framer) rather than duplicating them — see the sys.path shim below.
 
-Capture and base station are mutually exclusive (`_mode`). Survey points and
-the selected mode persist in STATE_DIR/state.json and are re-applied on boot.
+Capture and base station are mutually exclusive (`_mode`). Survey points, the
+selected mode, and the operator's NGII login (set from the console; unset ⇒ no
+RTK) persist in STATE_DIR/state.json and are re-applied on boot.
 
 Config (environment, see systemd/fsk-coursekeeper-gps.service):
-    NTRIP_USERNAME            optional NGII login; absent ⇒ run without RTK
     GPS_SERIAL_PORT           default /dev/ttyGPS
     GPS_BAUD                  default 115200
     GPS_MEAS_RATE_MS          receiver fix period, default 100 (10 Hz)
@@ -68,6 +68,7 @@ from pilot.lib.ubx_parser import (  # noqa: E402
 )
 from pilot.lib.ntrip_client import (  # noqa: E402
     NTRIPClient, fetch_source_table, parse_source_table, select_nearest_mountpoint,
+    valid_ntrip_username,
 )
 from pilot.lib.rtcm_utils import RTCM3Framer  # noqa: E402
 from pilot.lib.geo_utils import haversine  # noqa: E402
@@ -262,7 +263,8 @@ _POSITION_FIX_STATUSES = frozenset({"2d_fix", "3d_fix", "rtk_float", "rtk_fixed"
 # ---- persisted state ---------------------------------------------------------
 
 def default_state():
-    return {"mode": "capture", "active_base_point_id": None, "next_point_id": 1, "points": []}
+    return {"mode": "capture", "active_base_point_id": None, "next_point_id": 1, "points": [],
+            "ntrip_username": ""}
 
 
 def _is_int(value):
@@ -278,6 +280,8 @@ def validate_state(state):
         return False
     active = state.get("active_base_point_id")
     if active is not None and not _is_int(active):
+        return False
+    if not valid_ntrip_username(state.get("ntrip_username", "")):
         return False
     ids = set()
     for p in points:
@@ -410,11 +414,10 @@ class GpsRegisterAgent:
     Lock order: _api_lock → _lock. Nothing holding _lock takes _api_lock.
     """
 
-    def __init__(self, ntrip_username, state_dir, serial_port="/dev/ttyGPS",
+    def __init__(self, state_dir, serial_port="/dev/ttyGPS",
                  baud=115200, meas_rate_ms=100, status_interval=1.0,
                  device_id="gps", device_name=None, caster=None, events=None,
                  tailscale=None):
-        self._ntrip_username = ntrip_username or ""
         self._port = serial_port
         self._baud = baud
         self._meas_rate_ms = meas_rate_ms
@@ -459,6 +462,7 @@ class GpsRegisterAgent:
 
         self._state_path = os.path.join(state_dir, STATE_FILE_NAME)
         self._state = load_state(self._state_path)
+        self._ntrip_username = self._state.get("ntrip_username", "")
         self._apply_persisted_mode()
 
     # ---- persisted state ----------------------------------------------
@@ -655,7 +659,7 @@ class GpsRegisterAgent:
             return
         with self._lock:
             if (self._ntrip is not None or self._serial is not serial_ref
-                    or self._mode == "base-output"):
+                    or self._mode == "base-output" or not self._ntrip_username):
                 return
             log.info('NTRIP: auto-selected "%s" for (%.5f, %.5f)', mount, lat, lon)
             client = NTRIPClient(
@@ -680,8 +684,10 @@ class GpsRegisterAgent:
             if self._last_hpposllh is None:
                 self._record_position_locked(pvt.lat, pvt.lon, pvt.h_msl)
         self._maybe_setup_ntrip(pvt.lat, pvt.lon, pvt.fix_type)
-        if self._ntrip:
-            self._ntrip.update_position(pvt.lat, pvt.lon)
+        # One read: set_ntrip_username may drop the client from the API thread.
+        ntrip = self._ntrip
+        if ntrip:
+            ntrip.update_position(pvt.lat, pvt.lon)
 
     def _record_position_locked(self, lat, lng, alt):
         # Hold the last position until at least a 2D fix: a no-fix / time-only
@@ -1013,7 +1019,7 @@ class GpsRegisterAgent:
                 raise ApiError(404, "point_not_found", "Survey point not found.")
             if not self._ntrip_username:
                 raise ApiError(409, "ntrip_not_configured",
-                               "Surveying needs NGII RTK corrections; NTRIP_USERNAME is not set.")
+                               "Surveying needs NGII RTK corrections; set the NGII login first.")
             with self._lock:
                 if self._mode == "base-output":
                     raise ApiError(409, "base_mode",
@@ -1115,6 +1121,7 @@ class GpsRegisterAgent:
         return {
             "mode": mode,
             "active_base_point_id": active_base_point_id,
+            "ntrip_username": self._ntrip_username,
             "caster": {
                 "host": self._caster_host(),
                 "port": caster.port if caster is not None else None,
@@ -1131,6 +1138,33 @@ class GpsRegisterAgent:
                 self._select_capture(actor)
             else:
                 self._select_base(body.get("active_base_point_id"), actor)
+        return self.get_config()
+
+    def set_ntrip_username(self, username, actor="unknown"):
+        """Store the NGII login ("" clears it). A running NGII client is
+        stopped so the next 3D fix reconnects with the new login."""
+        if not valid_ntrip_username(username):
+            raise ApiError(400, "invalid_username",
+                           "username must be up to 128 printable ASCII characters without spaces or colons.")
+        with self._api_lock:
+            if username == self._ntrip_username:
+                return self.get_config()
+            state = copy.deepcopy(self._state)
+            state["ntrip_username"] = username
+            self._commit(state)
+            with self._lock:
+                self._ntrip_username = username
+                client = self._ntrip if self._mode != "base-output" else None
+                if client is not None:
+                    self._ntrip = None
+                self._ntrip_last_attempt = 0.0
+            if client is not None:
+                try:
+                    client.stop()
+                except Exception:
+                    pass
+        log.info("NGII login %s by %s", "set" if username else "cleared", actor)
+        self.notify_status()
         return self.get_config()
 
     def _select_capture(self, actor):
@@ -1244,7 +1278,6 @@ def load_config(env):
         raise ValueError(f"POSITION_REPORT_INTERVAL must be 0.1-{STATUS_MAX_INTERVAL_S} s (got {interval})")
     device_id = env.get("DEVICE_ID", "").strip() or socket.gethostname()
     return {
-        "ntrip_username": env.get("NTRIP_USERNAME", "").strip(),
         "serial_port": env.get("GPS_SERIAL_PORT", "").strip() or "/dev/ttyGPS",
         "baud": baud,
         "meas_rate_ms": meas_rate_ms,
@@ -1269,8 +1302,6 @@ def main():
     except ValueError as exc:
         log.error("%s", exc)
         raise SystemExit(2)
-    if not cfg["ntrip_username"]:
-        log.warning("NTRIP_USERNAME unset — running WITHOUT RTK corrections")
     if not cfg["allowed_origins"]:
         log.warning("ALLOWED_ORIGINS unset — browsers on other origins are refused")
     os.makedirs(cfg["state_dir"], exist_ok=True)
@@ -1279,7 +1310,6 @@ def main():
                          mountpoint=cfg["caster_mountpoint"])
     events = EventHub()
     agent = GpsRegisterAgent(
-        ntrip_username=cfg["ntrip_username"],
         state_dir=cfg["state_dir"],
         serial_port=cfg["serial_port"],
         baud=cfg["baud"],
@@ -1295,9 +1325,8 @@ def main():
                     allowed_origins=cfg["allowed_origins"])
     caster.start()
     api.start()
-    log.info("GPS unit %s starting (rtk=%s, api=:%d, caster=:%d/%s)",
-             cfg["device_id"], "on" if cfg["ntrip_username"] else "off",
-             cfg["api_port"], cfg["caster_port"], cfg["caster_mountpoint"])
+    log.info("GPS unit %s starting (api=:%d, caster=:%d/%s)",
+             cfg["device_id"], cfg["api_port"], cfg["caster_port"], cfg["caster_mountpoint"])
     try:
         agent.run()
     except KeyboardInterrupt:

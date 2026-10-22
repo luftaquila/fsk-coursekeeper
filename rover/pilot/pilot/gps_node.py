@@ -43,11 +43,11 @@ from pilot.lib.ntrip_client import (
 
 # NGII (국토지리정보원) is the default NTRIP caster. Host, port, and
 # password are protocol-level constants published on the gnssdata.or.kr
-# portal — the only per-rover value is the operator's NGII login, which
-# arrives via the NTRIP_USERNAME env var (sourced from the
-# ntrip-username podman secret). Update these constants if NGII ever
-# changes the caster endpoint. The other source is a GPS unit acting as a
-# base station: its caster address arrives on /rover/cmd/ntrip_source.
+# portal — the only per-rover value is the operator's NGII login, which the
+# console sets on the hub and the hub sends with the NGII source on
+# /rover/cmd/ntrip_source. Update these constants if NGII ever changes the
+# caster endpoint. The other source is a GPS unit acting as a base station:
+# its caster address arrives on the same topic.
 _NTRIP_HOST = 'www.gnssdata.or.kr'
 _NTRIP_PORT = 2101
 _NTRIP_PASSWORD = 'gnss'
@@ -64,10 +64,10 @@ _SERIAL_OPEN_RETRIES = 6
 _SERIAL_OPEN_BACKOFF_S = 2.0
 
 
-NGII_SOURCE = {'source': 'ngii'}
+NGII_SOURCE = {'source': 'ngii', 'username': ''}
 
 
-def ntrip_setup_due(source, username, has_client, fix_type, now, last_attempt,
+def ntrip_setup_due(source, has_client, fix_type, now, last_attempt,
                     cooldown_s=_NTRIP_SETUP_COOLDOWN_S):
     """Whether to start an NTRIP client now for `source` (parse_ntrip_source).
 
@@ -76,7 +76,7 @@ def ntrip_setup_due(source, username, has_client, fix_type, now, last_attempt,
     the operator login; a GPS unit's caster takes no credentials."""
     if has_client or fix_type < FixType.FIX_3D:
         return False
-    if source['source'] == 'ngii' and not username:
+    if source['source'] == 'ngii' and not source['username']:
         return False
     return now - last_attempt >= cooldown_s
 
@@ -131,7 +131,6 @@ class GpsNode(Node):
         self.declare_parameter('baud_rate', 115200)
         self.declare_parameter('publish_rate', 10.0)
         self.declare_parameter('heading_speed_threshold', 1.5)
-        self.declare_parameter('ntrip.username', '')
         self.declare_parameter('ntrip.gga_interval_s', 10.0)
 
         # Publishers
@@ -326,9 +325,8 @@ class GpsNode(Node):
         selected GPS unit; NTRIPClient itself reconnects with backoff.
         """
         source = self._ntrip_source
-        username = self.get_parameter('ntrip.username').value
         now = time.monotonic()
-        if not ntrip_setup_due(source, username, self._ntrip is not None,
+        if not ntrip_setup_due(source, self._ntrip is not None,
                                pvt.fix_type, now, self._ntrip_last_attempt):
             return
         with self._ntrip_setup_lock:
@@ -341,11 +339,11 @@ class GpsNode(Node):
         gga_interval = self.get_parameter('ntrip.gga_interval_s').value
         threading.Thread(
             target=self._ntrip_setup_worker,
-            args=(pvt.lat, pvt.lon, source, username, gga_interval, serial_ref),
+            args=(pvt.lat, pvt.lon, source, gga_interval, serial_ref),
             daemon=True,
         ).start()
 
-    def _ntrip_setup_worker(self, lat, lon, source, username, gga_interval, serial_ref):
+    def _ntrip_setup_worker(self, lat, lon, source, gga_interval, serial_ref):
         """Resolve the caster for `source` off the ROS timer thread and start
         NTRIP (the NGII source-table fetch can take seconds)."""
         try:
@@ -358,7 +356,7 @@ class GpsNode(Node):
                 host, port, mount = source['host'], source['port'], source['mountpoint']
                 user, password = '', ''
             else:
-                host, port, user, password = _NTRIP_HOST, _NTRIP_PORT, username, _NTRIP_PASSWORD
+                host, port, user, password = _NTRIP_HOST, _NTRIP_PORT, source['username'], _NTRIP_PASSWORD
                 mount = self._select_ngii_mount(lat, lon)
                 if not mount:
                     return

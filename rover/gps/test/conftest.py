@@ -64,9 +64,11 @@ def make_agent(tmp_path):
         events = RecordingEvents()
         caster = FakeCaster()
         agent = gr.GpsRegisterAgent(
-            ntrip_username=ntrip_username, state_dir=str(tmp_path),
+            state_dir=str(tmp_path),
             device_id="fsk-coursekeeper-gps", caster=caster, events=events,
             tailscale=FixedAddress(tailscale_ip), **kw)
+        if ntrip_username:
+            agent.set_ntrip_username(ntrip_username)
         return agent, events, caster
 
     return _make

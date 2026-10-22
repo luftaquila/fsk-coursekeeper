@@ -8,11 +8,11 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# Written by scripts/provision-gps.sh (0600, root-owned: holds the NGII login).
+# Written by scripts/provision-gps.sh (0600, root-owned).
 EnvironmentFile=/etc/fsk-coursekeeper-gps/gps.conf
 WorkingDirectory=/opt/fsk-coursekeeper-gps
 ExecStart=/usr/bin/python3 /opt/fsk-coursekeeper-gps/gps_register.py
-# Survey points + selected mode (STATE_DIR default).
+# Survey points, selected mode, and the NGII login (STATE_DIR default).
 StateDirectory=fsk-coursekeeper-gps
 StateDirectoryMode=0700
 # Runs as root: reads the 0600 config and the dialout serial node.

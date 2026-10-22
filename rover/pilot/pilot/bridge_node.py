@@ -11,7 +11,7 @@ Published topics:
     /rover/cmd/resume (std_msgs/Empty) - Mission resume from server
     /rover/cmd/manual_control (geometry_msgs/Twist) - Manual joystick from server
     /rover/cmd/request_position (std_msgs/Empty) - Position request from server
-    /rover/cmd/ntrip_source (std_msgs/String) - Correction source JSON (ngii | caster host/port/mountpoint)
+    /rover/cmd/ntrip_source (std_msgs/String) - Correction source JSON (ngii + login | caster host/port/mountpoint)
 
 Subscribed topics:
     /rover/gps/position (sensor_msgs/NavSatFix) - GPS position to report to server
