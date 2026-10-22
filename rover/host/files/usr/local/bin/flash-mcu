@@ -3,7 +3,7 @@
 # Baked into the host image at /usr/local/bin/flash-mcu.
 #
 # Usage:
-#   sudo flash-mcu <rover_mcu.uf2>
+#   sudo flash-mcu <fsk-coursekeeper-rover-mcu.uf2>
 #
 # Sequence:
 #   1. Send "B" over /dev/ttyMCU; the running firmware drops into the
@@ -19,7 +19,7 @@
 
 set -eu
 
-UF2="${1:?usage: $(basename "$0") <rover_mcu.uf2>}"
+UF2="${1:?usage: $(basename "$0") <fsk-coursekeeper-rover-mcu.uf2>}"
 [ -f "$UF2" ] || { echo "missing: $UF2" >&2; exit 1; }
 
 # The pilot container holds /dev/ttyMCU exclusive — stop it so we can

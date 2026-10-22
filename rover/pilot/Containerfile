@@ -2,9 +2,10 @@
 # (gps, mcu_bridge, navigator, spray, bridge) on the rover host.
 #
 # Built by the pilot job in .github/workflows/rover.yml and pushed to
-# ghcr.io/luftaquila/fsk-rover-pilot:{candidate,edge,vX.Y.Z}.
-# Pulled at runtime by the host's pilot.service systemd unit
-# (see rover/host/files/usr/lib/systemd/system/pilot.service),
+# ghcr.io/luftaquila/fsk-coursekeeper-rover-pilot:{vX.Y.Z,latest} by a release
+# or :edge-<sha> by a manual run. Pulled by the rover installer and run by the
+# host's pilot.service systemd unit
+# (see rover/host/files/etc/systemd/system/pilot.service),
 # which invokes /usr/local/bin/pilot-run to `podman run` this image
 # with only the /dev nodes actually present.
 
@@ -34,11 +35,6 @@ ENV PILOT_STATE_DIR=/var/lib/pilot
 # Release version (a tag, edge-<sha>, or dev), reported to the hub by bridge_node.
 ARG VERSION=dev
 ENV COURSEKEEPER_VERSION=${VERSION}
-
-# Opt this container in to `podman auto-update` (driven by the host's
-# podman-auto-update.timer). The host pulls the same tag from ghcr.io
-# and restarts the unit if the digest changed.
-LABEL io.containers.autoupdate=registry
 
 ENTRYPOINT ["/bin/bash", "-lc", \
     ". /opt/ros/jazzy/setup.bash \

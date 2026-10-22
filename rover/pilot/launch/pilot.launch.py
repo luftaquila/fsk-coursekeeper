@@ -1,4 +1,4 @@
-"""Launch file for the FSK Rover system.
+"""Launch file for the fsk-coursekeeper rover.
 
 Drive I/O (motor PWM, steering servo, encoder, battery ADC, E-Stop,
 watchdog) plus the mission-specific peristaltic pump (GP6, IRLZ44N

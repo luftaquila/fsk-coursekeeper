@@ -1,0 +1,49 @@
+name: Console
+
+# Deploys the standalone console to GitHub Pages: a release (release.yml)
+# deploys its tag after publishing it, and a manual run deploys the selected ref.
+on:
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Build the standalone console
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then version="${GITHUB_REF_NAME}"; else version="edge-${GITHUB_SHA::7}"; fi
+          corepack enable
+          pnpm install --frozen-lockfile
+          VITE_COURSEKEEPER_VERSION="$version" pnpm --filter fsk-coursekeeper-console build
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: console/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

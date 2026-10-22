@@ -1,4 +1,4 @@
-# FSK Rover Python dependencies
+# fsk-coursekeeper rover pilot Python dependencies
 # Install with: pip install -r requirements.txt
 
 pyserial>=3.5          # ZED-F9P UBX + RP2040 USB CDC

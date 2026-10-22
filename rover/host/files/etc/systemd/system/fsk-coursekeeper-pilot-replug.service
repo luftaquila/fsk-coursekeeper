@@ -11,7 +11,7 @@ StartLimitBurst=5
 [Service]
 Type=oneshot
 # Coalesce bursts: if the operator plugs in GPS and MCU within a
-# couple of seconds, both udev events fire fsk-pilot-replug, but the
+# couple of seconds, both udev events fire fsk-coursekeeper-pilot-replug, but the
 # second start is dropped while this oneshot is still in its sleep —
 # so pilot is restarted once instead of twice.
 ExecStartPre=/bin/sleep 2

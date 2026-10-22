@@ -27,32 +27,32 @@ function iniSection(text, sectionName) {
 }
 
 test('rover host keeps deterministic public DNS behind MagicDNS', async () => {
-  const profile = await readRepoFile(
-    'rover/host/files/etc/NetworkManager/system-connections/fsk-default.nmconnection',
+  const conf = await readRepoFile(
+    'rover/host/files/etc/NetworkManager/conf.d/90-fsk-coursekeeper-dns.conf',
   );
-  const ipv4 = iniSection(profile, 'ipv4');
+  const dns = iniSection(conf, 'global-dns-domain-*');
 
-  assert.equal(ipv4.method, 'auto', 'address and routes must still come from DHCP');
-  assert.equal(ipv4['ignore-auto-dns'], 'true');
-  assert.deepEqual(ipv4.dns.split(';').filter(Boolean), ['1.1.1.1', '8.8.8.8']);
+  // NetworkManager.conf lists are comma-separated.
+  assert.deepEqual(dns.servers.split(','), ['1.1.1.1', '8.8.8.8']);
 });
 
-test('rover cold boot reaches time sync without DNS before Tailscale starts', async () => {
-  const [containerfile, tailscaleOverride] = await Promise.all([
-    readRepoFile('rover/host/Containerfile'),
-    readRepoFile('rover/host/files/usr/lib/systemd/system/tailscaled.service.d/override.conf'),
-  ]);
-
-  assert.match(containerfile, /server 162\.159\.200\.123 iburst/);
-  assert.match(containerfile, /server 216\.239\.35\.0 iburst/);
-  assert.match(containerfile, /chrony-wait\.service/);
-  assert.match(tailscaleOverride, /^After=time-sync\.target$/m);
-  assert.match(tailscaleOverride, /^Wants=time-sync\.target$/m);
+test('devices keep their DNS off Tailscale so a stale clock can still sync', async () => {
+  for (const path of ['rover/host/install.sh', 'rover/gps/host/install.sh']) {
+    const installer = await readRepoFile(path);
+    // Both the first login and a later run set it; the tailnet name stays the Pi's host name.
+    assert.match(installer, /^\s+tailscale up --accept-dns=false$/m, path);
+    assert.match(installer, /^\s+tailscale set --accept-dns=false$/m, path);
+    assert.doesNotMatch(installer, /--hostname/, path);
+    assert.doesNotMatch(installer, /time-wait-sync/, path);
+  }
 });
 
-test('rover provisioning documents MagicDNS acceptance explicitly', async () => {
-  const readme = await readRepoFile('rover/README.md');
-
-  assert.match(readme, /tailscale up --auth-key=tskey-… --accept-dns=true/);
-  assert.match(readme, /public fallback/);
+test('device installers run from main so a piped script is read whole', async () => {
+  for (const path of ['rover/host/install.sh', 'rover/gps/host/install.sh']) {
+    const installer = await readRepoFile(path);
+    const lines = installer.trimEnd().split('\n');
+    assert.equal(lines.at(-1), 'main "$@"', path);
+    assert.match(installer, /^REPO="@REPO@"$/m, path);
+    assert.match(installer, /^VERSION="@VERSION@"$/m, path);
+  }
 });

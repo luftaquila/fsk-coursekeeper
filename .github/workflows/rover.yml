@@ -1,34 +1,32 @@
 name: Rover
 
+# Branch pushes test and build every changed component without publishing.
+# A release (release.yml, on a v* tag) builds them all and publishes the images
+# as :vX.Y.Z and :latest; a manual run publishes the chosen component's images
+# as :edge-<sha> for testing on a device.
 on:
   push:
     branches: [main]
     paths:
-      - 'rover/gps/**'
-      - 'rover/host/**'
-      - 'rover/mcu/**'
-      - 'rover/pilot/**'
+      - 'rover/**'
+      - 'scripts/package-devices.sh'
+      - 'tests/hub/**'
+      - 'tests/rover/**'
+      - 'pnpm-lock.yaml'
       - '.github/workflows/rover.yml'
+  workflow_call:
   workflow_dispatch:
     inputs:
       component:
-        description: 'Rover component to build or verify.'
+        description: 'Rover component to build (hub and pilot publish :edge-<sha> images).'
         required: true
         type: choice
         options:
           - pilot
-          - host
+          - hub
           - mcu
           - gps
-          - sd
-      release_channel:
-        description: 'OCI tag for host or pilot (e.g. candidate, edge, vX.Y.Z).'
-        required: false
-        default: 'candidate'
-      target_image:
-        description: 'Host image baked into the SD image first-boot switch.'
-        required: false
-        default: ''
+          - installers
 
 permissions:
   contents: read
@@ -37,24 +35,40 @@ jobs:
   changes:
     runs-on: ubuntu-latest
     outputs:
-      gps: ${{ steps.filter.outputs.gps }}
-      host: ${{ steps.filter.outputs.host }}
-      mcu: ${{ steps.filter.outputs.mcu }}
-      pilot: ${{ steps.filter.outputs.pilot }}
+      gps: ${{ steps.release.outputs.all || steps.filter.outputs.gps }}
+      hub: ${{ steps.release.outputs.all || steps.filter.outputs.hub }}
+      installers: ${{ steps.release.outputs.all || steps.filter.outputs.installers }}
+      mcu: ${{ steps.release.outputs.all || steps.filter.outputs.mcu }}
+      pilot: ${{ steps.release.outputs.all || steps.filter.outputs.pilot }}
     steps:
       - uses: actions/checkout@v6
 
+      # A release builds every component.
+      - id: release
+        if: github.ref_type == 'tag'
+        run: echo "all=true" >> "$GITHUB_OUTPUT"
+
       - uses: dorny/paths-filter@v4
         id: filter
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.ref_type != 'tag'
         with:
           filters: |
             gps:
               - 'rover/gps/**'
               - 'rover/pilot/pilot/lib/**'
               - '.github/workflows/rover.yml'
-            host:
+            hub:
+              - 'rover/hub/**'
+              - 'tests/hub/**'
+              - 'pnpm-lock.yaml'
+              - '.github/workflows/rover.yml'
+            installers:
+              - 'rover/common/**'
               - 'rover/host/**'
+              - 'rover/gps/**'
+              - 'rover/pilot/pilot/lib/**'
+              - 'scripts/package-devices.sh'
+              - 'tests/rover/**'
               - '.github/workflows/rover.yml'
             mcu:
               - 'rover/mcu/**'
@@ -87,27 +101,52 @@ jobs:
           python3 -m pip install -r rover/gps/requirements.txt
 
       - name: Compile agent sources
-        run: python3 -m compileall rover/gps/gps_register.py rover/gps/test
+        run: python3 -m compileall rover/gps/*.py rover/gps/test
 
       - name: Run gps pytest
         run: |
           cd rover/gps
           python3 -m pytest test/ -q
 
-  host:
+  hub-verify:
     needs: changes
     if: >-
-      (github.event_name == 'workflow_dispatch' && inputs.component == 'host') ||
-      needs.changes.outputs.host == 'true'
+      (github.event_name == 'workflow_dispatch' && inputs.component == 'hub') ||
+      needs.changes.outputs.hub == 'true'
+    runs-on: ubuntu-latest
+    concurrency:
+      group: rover-hub-image-${{ github.ref }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: |
+          corepack enable
+          pnpm install --frozen-lockfile
+
+      - name: Run hub tests
+        run: node --test --test-concurrency=2 'tests/hub/*.test.mjs'
+
+  hub:
+    needs: [changes, hub-verify]
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.component == 'hub') ||
+      needs.changes.outputs.hub == 'true'
     runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       packages: write
     concurrency:
-      group: rover-host-image-${{ github.ref }}
+      group: rover-hub-image-${{ github.ref }}
       cancel-in-progress: true
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/fsk-rover-host
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fsk-coursekeeper-rover-hub
+      PUBLISH: ${{ github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -115,34 +154,70 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve image tag
-        id: tag
-        env:
-          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+      - name: Version and tags
+        id: tags
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            channel="$RELEASE_CHANNEL"
+          if [ "${{ github.ref_type }}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "tags=$IMAGE:${GITHUB_REF_NAME},$IMAGE:latest" >> "$GITHUB_OUTPUT"
           else
-            channel="candidate"
+            echo "version=edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "tags=$IMAGE:edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
-          echo "tag=${IMAGE}:${channel}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push host image
+      - name: Build hub image
         uses: docker/build-push-action@v7
         with:
-          context: rover/host
-          file: rover/host/Containerfile
+          context: .
+          file: rover/hub/Containerfile
           platforms: linux/arm64
-          push: true
-          tags: ${{ steps.tag.outputs.tag }}
-          cache-from: type=gha,scope=rover-host
-          cache-to: type=gha,scope=rover-host,mode=max
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: VERSION=${{ steps.tags.outputs.version }}
+          cache-from: type=gha,scope=rover-hub
+          cache-to: type=gha,scope=rover-hub,mode=max
+
+  installers:
+    needs: changes
+    if: >-
+      (github.event_name == 'workflow_dispatch' && inputs.component == 'installers') ||
+      needs.changes.outputs.installers == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+
+      - name: Check
+        run: |
+          shellcheck -s bash rover/host/install.sh rover/gps/host/install.sh \
+            rover/common/files/usr/local/bin/* rover/host/files/usr/local/bin/pilot-run \
+            rover/host/files/usr/local/bin/hub-run rover/host/files/usr/local/bin/pid-tune
+          shellcheck -s sh scripts/package-devices.sh rover/host/files/usr/local/bin/flash-mcu \
+            rover/host/files/etc/NetworkManager/dispatcher.d/*
+          node --test 'tests/rover/*.test.mjs'
+
+      # The installers install this version's images: a release's tag, or on a
+      # branch the :edge-<sha> images a manual run would publish.
+      - name: Package
+        run: |
+          if [ "${{ github.ref_type }}" = tag ]; then version="${GITHUB_REF_NAME}"; else version="edge-${GITHUB_SHA::7}"; fi
+          scripts/package-devices.sh "${GITHUB_REPOSITORY}" "$version" .tmp/device-installers
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: device-installers
+          path: .tmp/device-installers
+          if-no-files-found: error
 
   mcu:
     needs: changes
@@ -199,20 +274,19 @@ jobs:
 
       - name: Verify firmware artifacts
         run: |
-          ls -la rover/mcu/build/rover_mcu.uf2
-          ls -la rover/mcu/build/rover_mcu.elf
-          arm-none-eabi-size rover/mcu/build/rover_mcu.elf
+          ls -la rover/mcu/build/fsk-coursekeeper-rover-mcu.uf2
+          ls -la rover/mcu/build/fsk-coursekeeper-rover-mcu.elf
+          arm-none-eabi-size rover/mcu/build/fsk-coursekeeper-rover-mcu.elf
 
       - name: Upload firmware artifact
         uses: actions/upload-artifact@v7
         with:
-          name: rover-mcu-firmware
+          name: fsk-coursekeeper-rover-mcu
           path: |
-            rover/mcu/build/rover_mcu.uf2
-            rover/mcu/build/rover_mcu.elf
-            rover/mcu/build/rover_mcu.bin
+            rover/mcu/build/fsk-coursekeeper-rover-mcu.uf2
+            rover/mcu/build/fsk-coursekeeper-rover-mcu.elf
+            rover/mcu/build/fsk-coursekeeper-rover-mcu.bin
           if-no-files-found: error
-          retention-days: 30
 
   pilot-verify:
     needs: changes
@@ -258,7 +332,8 @@ jobs:
       group: rover-pilot-image-${{ github.ref }}
       cancel-in-progress: true
     env:
-      IMAGE: ghcr.io/${{ github.repository_owner }}/fsk-rover-pilot
+      IMAGE: ghcr.io/${{ github.repository_owner }}/fsk-coursekeeper-rover-pilot
+      PUBLISH: ${{ github.ref_type == 'tag' || github.event_name == 'workflow_dispatch' }}
     steps:
       - uses: actions/checkout@v6
 
@@ -266,194 +341,32 @@ jobs:
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Resolve image tag
-        id: tag
-        env:
-          RELEASE_CHANNEL: ${{ inputs.release_channel }}
+      - name: Version and tags
+        id: tags
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            channel="$RELEASE_CHANNEL"
+          if [ "${{ github.ref_type }}" = tag ]; then
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            echo "tags=$IMAGE:${GITHUB_REF_NAME},$IMAGE:latest" >> "$GITHUB_OUTPUT"
           else
-            channel="candidate"
+            echo "version=edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "tags=$IMAGE:edge-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           fi
-          echo "tag=${IMAGE}:${channel}" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push pilot image
+      - name: Build pilot image
         uses: docker/build-push-action@v7
         with:
           context: rover/pilot
           file: rover/pilot/Containerfile
           platforms: linux/arm64
-          push: true
-          tags: ${{ steps.tag.outputs.tag }}
+          push: ${{ env.PUBLISH == 'true' }}
+          tags: ${{ steps.tags.outputs.tags }}
+          build-args: VERSION=${{ steps.tags.outputs.version }}
           cache-from: type=gha,scope=rover-pilot
           cache-to: type=gha,scope=rover-pilot,mode=max
-
-  sd:
-    needs: changes
-    if: github.event_name == 'workflow_dispatch' && inputs.component == 'sd'
-    runs-on: ubuntu-24.04-arm
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Resolve base image URL (latest gpt-10-arm64 release)
-        id: in
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TARGET_IMAGE: ${{ inputs.target_image }}
-        run: |
-          base_url=$(gh release view --repo AlmaLinux/bootc-images-rpi \
-              --json assets \
-              --jq '.assets[] | select(.name | test("^image-almalinux-bootc-rpi-gpt-10-[0-9]+-arm64\\.raw\\.xz$")) | .url' \
-              | head -1)
-          test -n "$base_url" || {
-            echo "Could not find gpt-10-arm64 asset in latest AlmaLinux/bootc-images-rpi release" >&2
-            gh release view --repo AlmaLinux/bootc-images-rpi --json tagName,assets --jq '.assets[].name'
-            exit 1
-          }
-          target="$TARGET_IMAGE"
-          [ -n "$target" ] || target='ghcr.io/${{ github.repository_owner }}/fsk-rover-host:candidate'
-          echo "base_url=$base_url" >> "$GITHUB_OUTPUT"
-          echo "target=$target"     >> "$GITHUB_OUTPUT"
-          echo "Resolved base: $base_url"
-          echo "Resolved host image target: $target"
-
-      - name: Download base SD image
-        env:
-          BASE_URL: ${{ steps.in.outputs.base_url }}
-        run: |
-          mkdir -p .tmp
-          curl -fsSL "$BASE_URL" | xz -d > .tmp/base.img
-          ls -lh .tmp/base.img
-
-      - name: Patch image (fan dtparams + first-boot bootc switch)
-        env:
-          TARGET_IMAGE: ${{ steps.in.outputs.target }}
-        run: |
-          IMG=.tmp/base.img
-          LOOP=$(sudo losetup -Pf --show "$IMG")
-          mkdir -p .tmp/efi .tmp/root
-
-          # Identify partitions by LABEL. AlmaLinux's bootc-images-rpi
-          # gpt-10 layout: CIDATA (vfat) holds Pi firmware + config.txt
-          # + cloud-init seed; root (xfs) holds the OSTree repo.
-          # boot (xfs) is bootloader config and is not touched here.
-          # LABEL match avoids the boot/root xfs ambiguity that bites
-          # TYPE-based matching.
-          EFI=""; ROOT=""
-          for part in "${LOOP}"p*; do
-            label=$(sudo blkid -o value -s LABEL "$part" 2>/dev/null || true)
-            case "$label" in
-              CIDATA) EFI="$part" ;;
-              root)   ROOT="$part" ;;
-            esac
-          done
-          test -n "${EFI:-}"  || { echo "no CIDATA partition found"        >&2; exit 1; }
-          test -n "${ROOT:-}" || { echo "no root (OSTree) partition found" >&2; exit 1; }
-
-          # 1a. Pi 5 fan to 100% + full USB current — CIDATA holds config.txt.
-          sudo mount "$EFI" .tmp/efi
-          printf '%s\n' \
-            '' \
-            '# FSK: pin the Pi 5 cooling fan to 100% regardless of temperature.' \
-            'dtparam=fan_temp0=0' \
-            'dtparam=fan_temp0_speed=255' \
-            'dtparam=fan_temp1=0' \
-            'dtparam=fan_temp1_speed=255' \
-            'dtparam=fan_temp2=0' \
-            'dtparam=fan_temp2_speed=255' \
-            'dtparam=fan_temp3=0' \
-            'dtparam=fan_temp3_speed=255' \
-            '' \
-            '# FSK: allow the full 1.6A USB-A budget. The custom 8-32V->5V 30W (6A)' \
-            '# DC-DC cannot USB-C PD-negotiate 5A, so the firmware caps USB-A at' \
-            '# 600mA; the stereo-camera USB reconnect inrush then trips a global' \
-            '# over-current that also drops the GPS and MCU. 1.6A absorbs the inrush.' \
-            'usb_max_current_enable=1' \
-            | sudo tee -a .tmp/efi/config.txt >/dev/null
-          echo "--- patched config.txt tail ---"
-          sudo tail -n 14 .tmp/efi/config.txt
-
-          # 1b. Replace cloud-init user-data on CIDATA.
-          # The stock AlmaLinux user-data creates user 'almalinux' at
-          # UID 1000 on first boot. That entry persists in /etc/passwd
-          # via OSTree's three-way merge and prevents our fsk user
-          # (also UID 1000, declared via sysusers.d in the host image)
-          # from being added on bootc switch. Overwriting user-data
-          # with an empty users list keeps cloud-init useful for
-          # growpart / hostname / ssh-host-key generation while
-          # leaving UID 1000 free for fsk.
-          sudo tee .tmp/efi/user-data >/dev/null <<'EOF'
-          #cloud-config
-          hostname: fsk-rover
-          ssh_pwauth: false
-          users: []
-          EOF
-          echo "--- patched user-data ---"
-          sudo cat .tmp/efi/user-data
-          sudo umount .tmp/efi
-
-          # 2. First-boot bootc switch oneshot.
-          # OSTree deploys boot from /ostree/deploy/<stateroot>/deploy/<commit>/,
-          # and the writable /etc at runtime is THAT deployment's etc/,
-          # not the unused /etc at the partition root. Locate it.
-          sudo mount "$ROOT" .tmp/root
-          DEPLOY_ETC=$(sudo find .tmp/root/ostree/deploy -mindepth 4 -maxdepth 4 -type d -name etc | head -1)
-          test -n "$DEPLOY_ETC" || {
-            echo "no OSTree deployment etc found under .tmp/root/ostree/deploy" >&2
-            sudo find .tmp/root/ostree/deploy -maxdepth 4 -type d >&2
-            exit 1
-          }
-          echo "OSTree deployment etc: $DEPLOY_ETC"
-          target="$TARGET_IMAGE"
-          UNIT_DIR="$DEPLOY_ETC/systemd/system"
-          sudo install -d -m 755 "$UNIT_DIR" "$UNIT_DIR/multi-user.target.wants"
-
-          # Pi 5 has no battery-backed RTC, so on the very first boot the
-          # system clock starts at whatever was the kernel build time
-          # (months ago) until chronyd syncs. bootc's pull from
-          # ghcr.io fails the TLS handshake when the wall clock is
-          # before the registry cert's NotBefore date. chronyc waitsync
-          # blocks until chrony has stepped/slewed the clock to a
-          # plausibly-current value before we attempt the registry
-          # pull.
-          sudo tee "$UNIT_DIR/fsk-firstboot.service" >/dev/null <<EOF
-          [Unit]
-          Description=FSK rover first-boot bootc switch
-          After=network-online.target chronyd.service
-          Wants=network-online.target chronyd.service
-          ConditionPathExists=!/var/lib/fsk-firstboot.done
-
-          [Service]
-          Type=oneshot
-          ExecStartPre=/usr/bin/chronyc waitsync 60 0 0 1
-          ExecStart=/usr/bin/bootc switch ${target}
-          ExecStartPost=/bin/sh -c 'touch /var/lib/fsk-firstboot.done && systemctl reboot'
-
-          [Install]
-          WantedBy=multi-user.target
-          EOF
-
-          sudo ln -sf ../fsk-firstboot.service \
-            "$UNIT_DIR/multi-user.target.wants/fsk-firstboot.service"
-          sudo umount .tmp/root
-
-          sudo losetup -d "$LOOP"
-
-      - name: Compress and upload
-        run: |
-          xz -T0 -c .tmp/base.img > .tmp/fsk-rover-sd.img.xz
-          ls -lh .tmp/fsk-rover-sd.img.xz
-
-      - name: Upload SD image artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: rover-sd-image
-          path: .tmp/fsk-rover-sd.img.xz
-          retention-days: 14

@@ -1,0 +1,64 @@
+name: Release
+
+# A v* tag publishes a release: every component is tested and built from the
+# tag, the hub and pilot images go to GHCR as :vX.Y.Z and :latest, the MCU
+# firmware and the device installers are attached to the GitHub release, and
+# then the standalone console is deployed.
+on:
+  push:
+    tags:
+      - v*
+
+# Called workflows get at most these (release: contents: write; images:
+# packages: write; Pages: pages/id-token).
+permissions:
+  contents: write
+  packages: write
+  pages: write
+  id-token: write
+
+jobs:
+  course:
+    uses: ./.github/workflows/course.yml
+  rover:
+    uses: ./.github/workflows/rover.yml
+  release:
+    runs-on: ubuntu-24.04
+    needs: [course, rover]
+    steps:
+      - uses: actions/download-artifact@v8
+      - run: |
+          mv device-installers/* .
+          mv fsk-coursekeeper-rover-mcu/fsk-coursekeeper-rover-mcu.uf2 .
+      - uses: ncipollo/release-action@v1
+        with:
+          allowUpdates: true
+          artifactErrorsFailBuild: true
+          artifacts: |
+            install-rover.sh
+            fsk-coursekeeper-rover.tar.gz
+            install-gps.sh
+            fsk-coursekeeper-gps.tar.gz
+            fsk-coursekeeper-rover-mcu.uf2
+          commit: ${{ github.sha }}
+          tag: ${{ github.ref_name }}
+          body: |
+            ### Console
+
+            * Open the [web console](https://luftaquila.github.io/fsk-coursekeeper/).
+
+            ### Rover
+
+            * Install on the rover's Raspberry Pi: `curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install-rover.sh | sudo bash`
+            * Update it: `sudo fsk-coursekeeper-update ${{ github.ref_name }}`
+            * Flash the MCU from the rover: `curl -fsSLO https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/fsk-coursekeeper-rover-mcu.uf2 && sudo flash-mcu fsk-coursekeeper-rover-mcu.uf2`
+
+            ### GPS unit
+
+            * Install on the GPS unit's Raspberry Pi: `curl -fsSL https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/install-gps.sh | sudo bash`
+            * Update it: `sudo fsk-coursekeeper-update ${{ github.ref_name }}`
+
+            Use this release on every device and the console.
+  pages:
+    needs: [release]
+    uses: ./.github/workflows/pages.yml

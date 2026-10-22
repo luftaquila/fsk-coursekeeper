@@ -1,0 +1,17 @@
+#!/bin/bash
+# Manual update of a Coursekeeper device, never automatic:
+#   sudo fsk-coursekeeper-update <latest | vX.Y.Z>
+# Runs that release's installer for this device (rover or GPS unit). Use the
+# release that matches the console; an older version rolls back.
+set -euo pipefail
+
+version="${1:?usage: fsk-coursekeeper-update <latest | vX.Y.Z>}"
+repo="$(cat /etc/fsk-coursekeeper/repo)"
+role="$(cat /etc/fsk-coursekeeper/role)"
+case "$version" in
+    latest) url="https://github.com/$repo/releases/latest/download/install-$role.sh" ;;
+    *) url="https://github.com/$repo/releases/download/$version/install-$role.sh" ;;
+esac
+# The installer replaces this file, so exit on the line that runs it: bash would
+# otherwise read on at its old offset in the new file.
+curl -fsSL "$url" | bash; exit

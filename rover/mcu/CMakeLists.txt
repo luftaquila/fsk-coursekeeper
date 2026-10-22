@@ -6,11 +6,11 @@ set(PICO_BOARD pico CACHE STRING "Board type")
 
 include(pico_sdk_import.cmake)
 
-project(rover_mcu C CXX ASM)
+project(fsk_coursekeeper_rover_mcu C CXX ASM)
 
 pico_sdk_init()
 
-add_executable(rover_mcu
+add_executable(fsk-coursekeeper-rover-mcu
     src/main.c
     src/encoder.c
     src/battery.c
@@ -27,12 +27,12 @@ add_executable(rover_mcu
 # already covers stall detection. Re-add a current.c module if a real
 # shunt-amp / INA219 ever lands.)
 
-pico_generate_pio_header(rover_mcu ${CMAKE_CURRENT_LIST_DIR}/src/quadrature_encoder.pio)
-pico_generate_pio_header(rover_mcu ${CMAKE_CURRENT_LIST_DIR}/src/ws2812.pio)
+pico_generate_pio_header(fsk-coursekeeper-rover-mcu ${CMAKE_CURRENT_LIST_DIR}/src/quadrature_encoder.pio)
+pico_generate_pio_header(fsk-coursekeeper-rover-mcu ${CMAKE_CURRENT_LIST_DIR}/src/ws2812.pio)
 
-target_include_directories(rover_mcu PRIVATE src)
+target_include_directories(fsk-coursekeeper-rover-mcu PRIVATE src)
 
-target_link_libraries(rover_mcu
+target_link_libraries(fsk-coursekeeper-rover-mcu
     pico_stdlib
     pico_multicore
     hardware_pio
@@ -45,8 +45,8 @@ target_link_libraries(rover_mcu
 )
 
 # USB CDC stdout (printf -> /dev/ttyACM0 on the Pi).
-pico_enable_stdio_usb(rover_mcu 1)
-pico_enable_stdio_uart(rover_mcu 0)
+pico_enable_stdio_usb(fsk-coursekeeper-rover-mcu 1)
+pico_enable_stdio_uart(fsk-coursekeeper-rover-mcu 0)
 # Cap the per-printf CDC-flush wait far below HW_WATCHDOG_MS=1000 so a
 # host-side stall (pilot reconnect loop, broken serial fd, kernel TTY
 # buffer full) can NEVER let printf hold the main loop past the watchdog
@@ -56,8 +56,8 @@ pico_enable_stdio_uart(rover_mcu 0)
 # USB re-enumerates → host racing to reconnect doesn't drain in time →
 # repeat. With 20 ms here, telemetry that can't be delivered is dropped
 # rather than killing the chip.
-target_compile_definitions(rover_mcu PRIVATE
+target_compile_definitions(fsk-coursekeeper-rover-mcu PRIVATE
     PICO_STDIO_USB_STDOUT_TIMEOUT_US=20000
 )
 
-pico_add_extra_outputs(rover_mcu)
+pico_add_extra_outputs(fsk-coursekeeper-rover-mcu)

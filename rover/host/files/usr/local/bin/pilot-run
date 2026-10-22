@@ -6,11 +6,12 @@
 # (e.g. GPS unplugged) makes podman refuse to create the container,
 # killing every other pilot node along with it. With this wrapper,
 # pilot.service starts with whatever's connected and the udev-driven
-# fsk-pilot-replug.service restarts it when devices come or go.
+# fsk-coursekeeper-pilot-replug.service restarts it when devices come or go.
 
 set -euo pipefail
 
-IMAGE="ghcr.io/luftaquila/fsk-rover-pilot:candidate"
+# The installed release's image, written by the rover installer.
+IMAGE="$(cat /etc/fsk-coursekeeper/pilot-image)"
 NAME="pilot"
 
 DEVS=()
@@ -27,22 +28,14 @@ done
 # named container behind. Be idempotent.
 podman rm -f "$NAME" >/dev/null 2>&1 || true
 
-# rover-secret은 프로비저닝된 경우에만 마운트한다 — 미프로비저닝 로버에서 존재하지 않는 secret을
-# --secret로 요구하면 podman run이 실패한다. 있으면 ROVER_SECRET을 주입해 장비가 X-Rover-Secret으로
-# 인증하고(허브 전역 INTERNAL_SECRET 불필요), 없으면 기존대로 INTERNAL_SECRET을 쓴다.
-ROVER_SECRET_ARGS=()
-if podman secret inspect rover-secret >/dev/null 2>&1; then
-    ROVER_SECRET_ARGS=(--secret rover-secret,type=env,target=ROVER_SECRET)
-fi
-
 # Pin public DNS resolvers instead of inheriting the host's resolv.conf.
 # With --network=host, podman snapshots /etc/resolv.conf at container-create
 # time. On a cold boot pilot.service can beat NetworkManager/Tailscale to it
 # and capture an EMPTY resolv.conf, leaving the container unable to resolve
-# test.luftaquila.io (server SSE) or www.gnssdata.or.kr (NTRIP) until a manual
-# `systemctl restart pilot.service` — i.e. "rover offline on site after a
-# power-cycle". Both targets are public domains, so hardcoded public resolvers
-# break the race and stay correct regardless of Tailscale/host DNS state.
+# www.gnssdata.or.kr (NTRIP) until a manual `systemctl restart pilot.service` —
+# i.e. "rover offline on site after a power-cycle". Hardcoded public resolvers
+# break that race. A GPS unit base station is addressed by its tailnet IP, so it
+# needs no DNS.
 #
 # ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST confines the DDS graph to loopback.
 # With --network=host on the open field Wi-Fi, the default (SUBNET) would let
@@ -58,11 +51,7 @@ exec podman run \
     --dns=1.1.1.1 \
     --dns=8.8.8.8 \
     --env ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
-    --label=io.containers.autoupdate=registry \
-    --label=PODMAN_SYSTEMD_UNIT=pilot.service \
     "${DEVS[@]}" \
-    --volume /var/lib/pilot:/var/lib/pilot:Z \
+    --volume /var/lib/pilot:/var/lib/pilot \
     --env-file /etc/pilot/pilot.conf \
-    --secret internal-secret,type=env,target=INTERNAL_SECRET \
-    "${ROVER_SECRET_ARGS[@]}" \
     "$IMAGE"

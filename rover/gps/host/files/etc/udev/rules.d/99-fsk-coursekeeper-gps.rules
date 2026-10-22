@@ -1,7 +1,7 @@
-# FSK Coursekeeper GPS unit device symlink. Installed to
-# /etc/udev/rules.d/ by scripts/provision-gps.sh. The agent opens the
-# stable /dev/ttyGPS symlink so it survives kernel/USB re-enumeration.
-# This is the GPS half of the rover's 99-fsk-rover.rules (no MCU here).
+# FSK Coursekeeper GPS unit device symlink, installed to /etc/udev/rules.d/
+# by the GPS unit installer. The agent opens the stable /dev/ttyGPS symlink so
+# it survives kernel/USB re-enumeration.
+# This is the GPS half of the rover's 99-fsk-coursekeeper-rover.rules (no MCU here).
 
 # u-blox ZED-F9P GNSS receiver -> /dev/ttyGPS
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1546", ATTRS{idProduct}=="01a9", \

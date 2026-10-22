@@ -1,0 +1,25 @@
+#!/bin/bash
+# Rover hub container launcher.
+#
+# The hub owns the mission ledger. It listens on loopback only: bridge_node
+# reaches its device port (10100) on this host, and `tailscale serve` exposes
+# its operator port (10101) to browsers on the tailnet as HTTPS (configured by
+# the rover installer). Its SQLite state persists on the host.
+
+set -euo pipefail
+
+# The installed release's image, written by the rover installer.
+IMAGE="$(cat /etc/fsk-coursekeeper/hub-image)"
+NAME="hub"
+
+# --rm should clean up on exit, but a hard kill / OOM can leave the named
+# container behind. Be idempotent.
+podman rm -f "$NAME" >/dev/null 2>&1 || true
+
+exec podman run \
+    --name "$NAME" \
+    --rm \
+    --network=host \
+    --volume /var/lib/fsk-coursekeeper-hub:/var/lib/fsk-coursekeeper-hub \
+    --env-file /etc/fsk-coursekeeper-hub/hub.conf \
+    "$IMAGE"

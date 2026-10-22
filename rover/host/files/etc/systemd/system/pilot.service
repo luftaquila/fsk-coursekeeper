@@ -1,0 +1,21 @@
+[Unit]
+Description=Coursekeeper rover pilot
+After=network-online.target podman.socket fsk-coursekeeper-hub.service
+Wants=network-online.target
+# Devices come and go at runtime — fsk-coursekeeper-pilot-replug.service restarts
+# this unit on USB plug/unplug so the wrapper re-probes /dev.
+# Avoid runaway restart loops if the stack keeps failing (e.g. the pilot
+# image is missing). systemd waits StartLimitIntervalSec before considering
+# this a permanent failure, then stops trying.
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pilot-run
+ExecStop=/usr/bin/podman stop -t 10 pilot
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target default.target

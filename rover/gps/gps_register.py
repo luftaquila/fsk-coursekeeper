@@ -54,7 +54,7 @@ import serial
 # Two layouts are supported: the in-repo tree (this file at
 # rover/gps/, pilot package one dir over at ../pilot/pilot) and the
 # on-unit deploy (/opt/fsk-coursekeeper-gps/ with the lib files copied to
-# /opt/fsk-coursekeeper-gps/pilot/lib by provision-gps.sh). In both, the
+# /opt/fsk-coursekeeper-gps/pilot/lib by the release packaging). In both, the
 # package *root* that makes `import pilot.lib.*` resolve is what we add to sys.path.
 _HERE = os.path.dirname(os.path.abspath(__file__))
 for _cand in (_HERE, os.path.join(_HERE, os.pardir, "pilot")):
