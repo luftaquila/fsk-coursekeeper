@@ -1,113 +1,84 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted, nextTick, watch, inject } from "vue";
+import { ref, computed, onMounted, onUnmounted, nextTick, watch } from "vue";
 import L from "leaflet";
-import { useHost } from "../host.mjs";
 import { createCourseBaseMap, courseCenterlineLayer } from "../lib/course-map.mjs";
-import { courseDisplayState, courseDirectionOptions } from "../lib/course-display.mjs";
+import { courseDisplayState } from "../lib/course-display.mjs";
 import CourseMapIcon from "../components/CourseMapIcon.vue";
 import { renderMapBearing as renderBearing } from "../lib/course-view-preferences.mjs";
 import MissionBuilder from "../components/MissionBuilder.vue";
-import { optimizeConeRoute } from "../lib/mission-route.mjs";
-import {
-  buildMissionCreatePayload,
-  missionRouteCourseMismatch,
-  buildMissionCommandPayload,
-  buildMissionPresetDeletePayload,
-  buildMissionPresetPayload,
-  buildMissionRemainingPayload,
-  captureMissionAuthorityFence,
-  captureMissionAuthorityRequest,
-  captureMissionCreateRouteAuthority,
-  mergeMissionSummary,
-  missionAbsentSnapshotDecision,
-  missionAuthorityFenceMatches,
-  missionAuthorityKey,
-  missionAuthorityRequestCanApply,
-  missionBuilderSubmission,
-  missionCommandResponseDecision,
-  missionEndAwaitingState,
-  missionEndReconcileIsCurrent,
-  missionEndReconcileShouldRetry,
-  missionEndRequestFailureState,
-  missionEndResponseDecision,
-  missionCreateRouteAuthorityMatches,
-  missionHttpResponseAuthorityDecision,
-  missionCommandToken,
-  missionCommandTokenAfterSync,
-  missionCourseId,
-  missionCreateSettlementDecision,
-  missionDraftMatches,
-  missionDraftToken,
-  missionEmptyResumeMode,
-  missionMotionConfirmedHeld,
-  missionNeedsManualRelease,
-  missionPathActionDisabled,
-  missionPathGeometry,
-  missionPreflightCanConfirm,
-  missionPreflightDistanceAllowed,
-  missionPreflightRouteCheck,
-  missionPreflightTarget,
-  missionRestoreDecision,
-  missionSnapshotMatchesSummary,
-  missionSummaryRefreshDecision,
-  splitMissionStatusPayload,
-  presetResponseIsCurrent,
-  reconcileMissionEndAuthorityRequest,
-  shouldAbandonMissionForCourseSwitch,
-  shouldConsumeLegacyMissionIndexEvent,
-  trackManualControlRequest,
-  waitForManualControlDrain,
-} from "../lib/mission-session.mjs";
-import { useNotification } from "../notify.mjs";
-import { haversine, formatCoord, formatLatLng, formatAlt } from "../../geo.mjs";
-import { resolveCourseRoute, ROUTE_MODE } from "../../route-mode.mjs";
+import { formatCoord, formatLatLng, formatAlt } from "../../geo.mjs";
+import { ROUTE_MODE } from "../../route-mode.mjs";
 import { buildSideRanks } from "../../cone-index.mjs";
 import { useMeasureTools } from "../composables/useMeasureTools.js";
 import { useCourseImportExport } from "../composables/useCourseImportExport.js";
 import { useCourseSnapshots } from "../composables/useCourseSnapshots.js";
 import {
   SPRAY_OUTCOME_SYMBOL, SPRAY_OUTCOME_COLOR, DISCONNECT_REASON_LABEL,
-  BATTERY_WARN_PERCENT, BATTERY_CRIT_PERCENT, ACTIVE_NAV_STATES,
-  FIX_STATUS_META, formatDurationSec, roverFaultRows,
+  BATTERY_WARN_PERCENT, BATTERY_CRIT_PERCENT, FIX_STATUS_META, roverFaultRows, isValidRoverPos,
 } from "../lib/rover-ui.mjs";
 import {
   SIDE_COLORS, coneIcon, highlightIcon, multiSelectIcon,
   coneDiameterForZoom, LabeledConeCanvas,
 } from "../lib/cone-render.mjs";
+import { formatLogTime, formatMissionDuration, formatMissionTimestamp, formatSnapshotTime } from "../lib/console-format.mjs";
+import { useConsoleState } from "../state/console.mjs";
+import { loadPref, savePref } from "../state/prefs.mjs";
+import { NAV_LIGHT_MODES } from "../state/rover-store.mjs";
+import { MISSION_STATUS_COLOR, MISSION_STATUS_LABEL } from "../state/review-store.mjs";
 
-const { success: notifySuccess, error: notifyError, warning: notifyWarn } = useNotification();
-const host = useHost();
-const canOperateRover = host.access.permission("rover.operate");
-const canManageCourse = host.access.permission("course.manage");
-
-// Course data goes to the host; rover and GPS operations go to the selected device.
-const courseRequest = (endpoint, options) => host.course.request(endpoint, options);
-function deviceRequest(kind, missing) {
-  return (endpoint, options) => {
-    const transport = host.devices.transport(kind);
-    if (!transport) return Promise.reject(Object.assign(new Error(missing), { status: 503 }));
-    return transport.request(endpoint, options);
-  };
-}
-const roverRequest = deviceRequest("rover", "No rover is configured.");
-const gpsRequest = deviceRequest("gps", "No GPS unit is configured.");
-const stopping = inject("stopping", ref(false));
-const sseReconnecting = inject("sseReconnecting", ref(false));
-const appRoverConnected = inject("roverConnected", null);
-const appNavState = inject("navState", null);
-const appRoverStopRequested = inject("roverStopRequested", null);
+const state = useConsoleState();
+const { host, access, edits, course, rover, gps, mission, review } = state;
+const { success: notifySuccess, error: notifyError, warning: notifyWarn } = state.notify;
+const canOperateRover = access.canOperateRover;
+const canManageCourse = access.canManageCourse;
+const uiTick = state.clock.tick;
+const courseRequest = course.request;
+const roverRequest = rover.request;
+const undoStack = edits.stack;
+const {
+  courses, conesMap, memosMap, routeMap, visibility, activeCourseId, publishingId,
+  activeCourse, activeCones, activeMemos, activeRoute, routeMarkerById, hasMarkerRoute, activeConeSideRanks,
+  centerline, routeMode, routeError,
+} = course;
+const { updateRouteMarker, appendRouteVisit, moveRouteVisit, removeRouteVisit, saveRouteSteps } = course;
+const {
+  roverStatus, stopping, lastPositionAge, ntripCorrectionAge,
+  ledBrightness, pumpDuration, pumpOn, pumpBusy, navLightsBusy,
+} = rover;
+const onLedBrightnessInput = rover.setLedBrightness;
+const onPumpDurationInput = rover.setPumpDuration;
+const togglePump = rover.togglePump;
+const {
+  receiver, receiverConnected, baseState, surveyingPointId, surveyProgress, receiverPositionAge,
+  receiverCorrectionAge, receiverCanTrack, positionSource, gpsUnitConfig, gpsConfig, surveyPoints,
+  surveyedPoints, hasSurveyedPoint, gpsSaving, selectedBasePointId, baseNoReceiver,
+} = gps;
+const { setNtripSource, startSurvey, cancelSurvey } = gps;
+const {
+  roverMode, pathWaypoints, missionFinishBehavior, pathStart, pathReturnOrigin, pathGeometry, pathDistance,
+  executedIndex, pathProgress, sprayResults, currentTargetDistance, missionETA, remainingDistanceM,
+  activeMission, activeMissionAuthority, missionHeld, missionEndBusy, missionEndAwaitingAckId,
+  pathButtonDisabled, pathBtnLabel, pathBtnClass,
+  showMissionBuilder, missionBuilderItems, missionBuilderEditing, missionBuilderBusy, missionPresets, missionPresetBusy,
+  showPreflight, preflightForce, preflightMode, preflightEmptyRouteMode, preflightChecks, preflightFlash,
+  preflightAllOk, preflightHasBlockingFailure, preflightCanConfirm,
+  PAUSABLE_NAV, pauseBusy, manualThrottle, manualSteering, manualAuthorityReleaseBusy,
+} = mission;
+const {
+  onPathBtn, moveWaypoint, clearPath, abandonMission, openMissionBuilder, applyMissionBuilder, runMissionBuilder,
+  saveMissionPreset, deleteMissionPreset, cancelPreflight, confirmPreflight, pauseMission, resumeMission,
+  startManualControl, stopManualControl,
+} = mission;
+const {
+  missions, missionTotal, selectedMissionId, missionDetail, missionSamples, missionLoading, missionLoadingMore,
+  replayPlaying, replayIdx, replaySpeed, currentSampleTime, currentSampleState, currentSampleFix,
+  logEntries, logsNewestFirst, logsNewestFirstTrimmed, logUploadedAt, logFetching,
+} = review;
+const { loadMoreMissions, selectMission, togglePlay, refreshLogs, requestLogs, downloadLogs } = review;
 
 /* ── State ─────────────────────────────────────────── */
-const courses = ref([]);
-const conesMap = ref({});
-const memosMap = ref({}); // 코스별 메모 스티커: courseId → memo[] { id, course_id, lat, lng, width, height, content }
-const routeMap = ref({}); // 코스별 { markers, steps }; steps may repeat marker ids
 // 지도가 움직일 때마다 올려서 지리 좌표 고정 메모의 화면 위치·크기를 재계산시키는 트리거.
 const mapFrame = ref(0);
-// Old defaults cannot distinguish explicit overlays; use a fresh preference.
-const visibility = ref(loadPref("overlays", {}, (v) => JSON.parse(v) || {}));
-const activeCourseId = ref(null);
-const loading = ref(true);
 const newCourseName = ref("");
 // Course ZIP export / JSON import lives in a composable; destructured so the
 // template keeps using importInput/exportingId/exportCourse/triggerImport/importCourse by name.
@@ -119,12 +90,6 @@ const roverLoading = ref(false);
 const editLocked = ref(loadPref("editLocked", true, (v) => v === "true")); // default locked; screen tap/drag can't add/move/rotate/delete cones; persisted
 const showCenterline = ref(loadPref("showCenterline", true, (v) => v === "true")); // course centerline graphic; default on; persisted
 const routeEditMode = ref(false); // unlocked map taps place reusable route markers
-const routeError = ref("");
-const routeMode = ref(ROUTE_MODE.AUTO); // which engine produced `centerline`
-// Per-course start cone + travel direction live on the server course row
-// (course.start_cone_id / course.reverse), shared by every operator and synced
-// over the 'courses' SSE broadcast — no longer a per-device localStorage pref.
-const centerline = ref(null); // computed centerline of the active course: { ok, closed, length, points } | null
 const coneListEl = ref(null);         // cone-list scroll container (for scroll-to-top)
 const coneListScrolled = ref(false);  // true once the list is scrolled down a bit
 const coneFilter = ref("all");
@@ -159,7 +124,7 @@ function restoreLiveMapLayers() {
   rebuildAllMarkers();
   rebuildRouteMarkers();
   syncDeviceMarkers(roverStatus.value);
-  if (pathStart) renderPath();
+  if (pathStart.value) renderPath();
   renderSprayMarkers();
 }
 
@@ -194,8 +159,6 @@ function clearOtherModes() {
 }
 // Box-select mode — drag-to-select that also works on touch (no Shift key needed).
 const selectMode = ref(false);
-// Undo stack of {label, undo} entries; each `undo` reverses one edit via the API.
-const undoStack = ref([]);
 const editLat = ref("");
 const editLng = ref("");
 const editSide = ref("left");
@@ -204,108 +167,13 @@ const editSide = ref("left");
 const editLatOrig = ref("");
 const editLngOrig = ref("");
 const editingCourseId = ref(null);
-const publishingId = ref(null);
 const editCourseName = ref("");
 
-// Rover control
-const roverMode = ref("none"); // none | path-pick | path-ready | executing | stopped | manual
-const pathWaypoints = ref([]);
-const missionFinishBehavior = ref("stop");
-const showMissionBuilder = ref(false);
-const missionBuilderItems = ref([]);
-const missionBuilderEditing = ref(false);
-const missionBuilderBusy = ref(false);
-const missionBuilderBase = ref(null);
-const missionPresets = ref([]);
-const missionPresetBusy = ref(false);
-const missionEndBusy = ref(false);
-const missionEndAwaitingAckId = ref(null);
-const missionEndAwaitingCommandId = ref(null);
-let missionEndReconcileTimer = null;
-let missionEndReconcileEpoch = 0;
-const pathPresetReference = ref(null);
-let missionPresetRequestSeq = 0;
-const executedIndex = ref(0);
-const pathProgress = ref(0);
-const pathDistance = ref(0);
-const manualThrottle = ref(0);
-const manualSteering = ref(0);
-const manualAuthorityReleaseBusy = ref(false);
 // Joystick DOM refs: the knob + readout are updated imperatively while dragging
 // so a pointermove (≈120Hz on mobile) doesn't re-render this whole component.
 const joystickKnobEl = ref(null);
 const joystickInfoEl = ref(null);
-const pumpBusy = ref(false);
 
-// Rover live status (from SSE rover:status event)
-const roverStatus = ref({
-  connected: false,
-  last_position_at: 0,
-  fix_status: null,
-  nav_state: null,
-  ntrip_connected: null,
-  last_disconnect_reason: null,
-  last_disconnect_at: 0,
-  last_spray_result: null,
-  battery: null,
-  ntrip: null,
-  gps: null,
-  // The rover's correction source: { source: "ngii" } or
-  // { source: "caster", host, port, mountpoint } (a GPS unit base station).
-  ntrip_source: { source: "ngii" },
-  // The NGII login the hub sends with the NGII source ("" = unset).
-  ntrip_username: "",
-  active_mission: null,
-  mission_protocol: { required: 2, connected: null, compatible: false, boot_id: null },
-});
-
-function syncAppRoverStatus(data) {
-  if (!data || typeof data !== "object") return;
-  if (appRoverConnected && typeof data.connected === "boolean") {
-    appRoverConnected.value = data.connected;
-  }
-  if (appNavState && typeof data.nav_state === "string") {
-    appNavState.value = data.nav_state;
-  }
-  if (appRoverStopRequested && typeof data.stop_requested === "boolean") {
-    appRoverStopRequested.value = data.stop_requested;
-  }
-}
-
-// The GPS unit serves its own API; its status arrives as gps:status events.
-// null until the unit answers.
-const gpsStatus = ref(null);
-const gpsOnline = ref(false);
-
-async function fetchGpsStatus() {
-  if (!host.devices.transport("gps")) {
-    gpsStatus.value = null;
-    gpsOnline.value = false;
-    return;
-  }
-  try {
-    gpsStatus.value = await (await gpsRequest("/api/gps/status")).json();
-    gpsOnline.value = true;
-  } catch {
-    gpsOnline.value = false;
-  }
-}
-
-// The unit reports position at ~1 Hz while it holds a fix and stops when the fix
-// drops, so an older position means it cannot answer a capture right now.
-const RECEIVER_POSITION_STALE_MS = 5000;
-
-// Which device currently supplies the cone-capture position: the GPS unit
-// (preferred, when it is in capture mode with a fresh fix), the rover
-// (fallback), or nothing usable. Drives the cone-add button icon and state.
-const positionSource = computed(() => {
-  uiTick.value;
-  const r = receiver.value;
-  if (r?.connected && r.mode === "capture" && r.last_position
-      && Date.now() - r.last_position_at < RECEIVER_POSITION_STALE_MS) return "receiver";
-  if (roverStatus.value.connected) return "rover";
-  return null;
-});
 const canCaptureCone = computed(() => positionSource.value != null);
 const coneCaptureIcon = computed(() =>
   positionSource.value === "receiver" ? "🛰️"
@@ -316,50 +184,8 @@ const coneCaptureTitle = computed(() =>
   : positionSource.value === "rover" ? "Add cone at the rover GPS position"
   : "No GPS source — connect a GPS unit or the rover");
 
-let manualFailCount = 0;
-
-// sprayResults: Map<globalWaypointIdx, { outcome, at }>
-const sprayResults = ref(new Map());
+// Spray outcome markers by global waypoint index.
 let sprayMarkers = {};
-
-// Pre-flight checklist modal state
-const showPreflight = ref(false);
-const preflightForce = ref(false);
-const preflightMode = ref("execute"); // "execute" | "resume"
-const preflightRouteAlreadySynced = ref(false);
-const preflightMissionToken = ref(null);
-const preflightMissionDraft = ref(null);
-const preflightAuthorityToken = ref(null);
-const preflightEmptyRouteMode = ref(null);
-
-// Tick ref — bumps every second so time-ago computeds recalc even when no
-// new SSE event arrives (otherwise "pos 0s" stays stale when the rover stops).
-const uiTick = ref(0);
-let uiTickInterval = null;
-
-// Distance from rover's last reported position to the next-target waypoint.
-// Only meaningful while a mission is actually being driven.
-const currentTargetDistance = computed(() => {
-  if (roverMode.value !== "executing") return null;
-  const idx = executedIndex.value;
-  const lp = roverStatus.value.last_position;
-  if (!lp) return null;
-  if (pathWaypoints.value.length === 0
-      && missionFinishBehavior.value === "return_to_start" && pathStart) {
-    return haversine(lp, pathStart);
-  }
-  if (idx < 0 || idx >= pathWaypoints.value.length) return null;
-  return haversine(lp, pathWaypoints.value[idx]);
-});
-
-const missionETA = computed(() => {
-  if (roverMode.value !== "executing") return null;
-  if (pathTotalDist <= 0) return null;
-  const speed = roverStatus.value.gps?.speed;
-  if (!speed || speed < 0.05) return null;
-  const remaining = pathTotalDist * Math.max(0, (100 - pathProgress.value) / 100);
-  return formatDurationSec(remaining / speed);
-});
 
 // Per-chip computeds. Each chip owns its own tone (ok/warn/bad/neutral) so
 // the strip's overall color band is decided separately (primary class).
@@ -475,77 +301,23 @@ const batteryChip = computed(() => {
   return { percent: p, voltage: s.battery.voltage, tone, rows };
 });
 
-// Nav-light pattern selector. Operator picks here; the server persists the
-// choice and re-sends it to the rover on (re)connect so it sticks.
-const NAV_LIGHT_MODES = [
-  { mode: 0, label: "Off", short: "OFF" },
-  { mode: 1, label: "Steady", short: "STEADY" },
-  { mode: 2, label: "Double strobe", short: "STROBE2" },
-  { mode: 3, label: "Single strobe", short: "STROBE1" },
-  { mode: 4, label: "50% blink", short: "BLINK" },
-];
+// Nav-light pattern selector. The hub persists the choice and re-sends it to
+// the rover on (re)connect.
 const navLightsChip = computed(() => {
   const s = roverStatus.value;
   if (!s.connected) return null;
   const mode = Number.isInteger(s.nav_lights_mode) ? s.nav_lights_mode : 2;
   return { mode, label: (NAV_LIGHT_MODES[mode] || NAV_LIGHT_MODES[2]).short };
 });
-const navLightsBusy = ref(false);
 async function setNavLights(mode) {
-  if (navLightsBusy.value) return;
-  navLightsBusy.value = true;
-  try {
-    await roverRequest("/api/rover/nav-lights", { method: "POST", body: JSON.stringify({ mode }) });
-    roverStatus.value = { ...roverStatus.value, nav_lights_mode: mode };
-    activeChipPopover.value = null;
-  } catch (err) {
-    notifyError(`Failed to set nav lights: ${err.message}`);
-  } finally {
-    navLightsBusy.value = false;
-  }
-}
-
-// Status-LED (TSAL) global brightness 0-255, slider in the 💡 popover.
-const ledBrightness = ref(255);
-watch(() => roverStatus.value.led_brightness, (v) => {
-  if (Number.isInteger(v)) ledBrightness.value = v;
-});
-let ledBrightnessTimer = null;
-function onLedBrightnessInput(val) {
-  ledBrightness.value = Number(val);
-  if (ledBrightnessTimer) clearTimeout(ledBrightnessTimer);
-  ledBrightnessTimer = setTimeout(() => {
-    roverRequest("/api/rover/led-brightness", {
-      method: "POST",
-      body: JSON.stringify({ brightness: ledBrightness.value }),
-    }).catch((err) => notifyError(`Failed to set TSAL brightness: ${err.message}`));
-  }, 200);
-}
-
-// Peristaltic pump: manual on/off toggle (manual-control PUMP button) + dispense-time
-// slider ("Dispense time", in the 💡 popover). Both mirror server rover status.
-const pumpOn = computed(() => roverStatus.value.pump_on === true);
-const pumpDuration = ref(2.0);
-watch(() => roverStatus.value.pump_run_duration, (v) => {
-  if (typeof v === "number" && v > 0) pumpDuration.value = v;
-});
-let pumpDurationTimer = null;
-function onPumpDurationInput(val) {
-  pumpDuration.value = Number(val);
-  if (pumpDurationTimer) clearTimeout(pumpDurationTimer);
-  pumpDurationTimer = setTimeout(() => {
-    roverRequest("/api/rover/pump-duration", {
-      method: "POST",
-      body: JSON.stringify({ seconds: pumpDuration.value }),
-    }).catch((err) => notifyError(`Failed to set dispense time: ${err.message}`));
-  }, 200);
+  if (await rover.setNavLights(mode)) activeChipPopover.value = null;
 }
 
 const missionChip = computed(() => {
   if (roverMode.value !== "executing" && roverMode.value !== "stopped") return null;
   const returnOnly = pathWaypoints.value.length === 0
     && missionFinishBehavior.value === "return_to_start"
-    && pathStart && pathReturnOrigin;
+    && pathStart.value && pathReturnOrigin.value;
   if (pathWaypoints.value.length === 0 && !returnOnly) return null;
   const lines = [returnOnly
     ? `Returning to mission start: ${pathProgress.value}%`
@@ -630,28 +402,6 @@ const disconnectInfo = computed(() => {
   return { label, ago };
 });
 
-// Expanded detail panel
-
-const ntripCorrectionAge = computed(() => {
-  uiTick.value;
-  const n = roverStatus.value.ntrip;
-  if (!n?.last_correction_at) return null;
-  return Math.max(0, Math.round(Date.now() / 1000 - n.last_correction_at));
-});
-
-const lastPositionAge = computed(() => {
-  uiTick.value;
-  const at = roverStatus.value.last_position_at;
-  if (!at) return null;
-  return Math.max(0, Math.round((Date.now() - at) / 1000));
-});
-
-const remainingDistanceM = computed(() => {
-  if (roverMode.value !== "executing") return null;
-  if (pathTotalDist <= 0) return null;
-  return pathTotalDist * Math.max(0, (100 - pathProgress.value) / 100);
-});
-
 // Release versions. A console or device built from a release reports its tag
 // (vX.Y.Z); edge and dev builds report another name and are never flagged.
 const RELEASE_VERSION = /^v\d+\.\d+\.\d+$/;
@@ -676,74 +426,6 @@ const INSPECTOR_TABS = [
 ];
 const visibleTabs = computed(() => INSPECTOR_TABS.filter((t) => canOperateRover.value || !t.roverOnly));
 
-// Mission history state (integrated into this view so the same map + rail +
-// inspector structure serves both the live operation and replay).
-const missions = ref([]);
-const missionTotal = ref(0);
-const missionPage = 50;
-const selectedMissionId = ref(null);
-const missionDetail = ref(null);
-const missionSamples = ref([]);
-const missionLoading = ref(false);
-const missionLoadingMore = ref(false);
-const replayPlaying = ref(false);
-const replayIdx = ref(0);
-const replaySpeed = ref(1);
-let playTimer = null;
-
-const MISSION_STATUS_LABEL = { running: "Running", paused: "Paused", interrupted: "Interrupted", completed: "Completed", stopped: "Stopped", error: "Error" };
-const MISSION_STATUS_COLOR = { running: "#3b82f6", paused: "#a855f7", interrupted: "#f97316", completed: "#22c55e", stopped: "#f59e0b", error: "#ef4444" };
-
-function formatMissionDuration(started, ended) {
-  if (!ended) return "—";
-  const s = Math.round((ended - started) / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  return `${m}m ${s % 60}s`;
-}
-function formatMissionTimestamp(ms) {
-  if (!ms) return "—";
-  return new Date(ms).toLocaleString("ko-KR", { hour12: false });
-}
-
-async function loadMissions() {
-  missionLoading.value = true;
-  try {
-    const res = await roverRequest(`/api/missions?limit=${missionPage}&offset=0`);
-    const data = await res.json();
-    missions.value = data.missions || [];
-    missionTotal.value = data.total || 0;
-  } catch (err) { notifyError(err.message); }
-  finally { missionLoading.value = false; }
-}
-async function loadMoreMissions() {
-  if (missionLoadingMore.value || missions.value.length >= missionTotal.value) return;
-  missionLoadingMore.value = true;
-  try {
-    const res = await roverRequest(`/api/missions?limit=${missionPage}&offset=${missions.value.length}`);
-    const data = await res.json();
-    missions.value = [...missions.value, ...(data.missions || [])];
-    missionTotal.value = data.total || missions.value.length;
-  } catch (err) { notifyError(err.message); }
-  finally { missionLoadingMore.value = false; }
-}
-
-async function selectMission(id) {
-  if (selectedMissionId.value === id) return;
-  selectedMissionId.value = id;
-  stopReplay();
-  try {
-    const [d, t] = await Promise.all([
-      roverRequest(`/api/missions/${id}`).then((r) => r.json()),
-      roverRequest(`/api/missions/${id}/telemetry`).then((r) => r.json()),
-    ]);
-    missionDetail.value = d;
-    missionSamples.value = t.samples || [];
-    replayIdx.value = 0;
-    renderMissionMap();
-  } catch (err) { notifyError(err.message); }
-}
-
 // Mission map layers — kept separate from the live cone/rover layers so
 // switching tabs is a clean swap instead of overlapping paint.
 let missionPlannedMarkers = [];
@@ -751,7 +433,6 @@ let missionPlannedPath = null;
 let missionActualPath = null;
 let centerlineLayer = null;   // Leaflet layer group drawing the active course centerline
 let routeMarkerLayers = [];   // reusable ordered-route markers for the active course
-let centerlineTimer = null;   // debounce handle for recompute
 let missionReplayMarker = null;
 
 function clearMissionMap() {
@@ -831,36 +512,9 @@ function updateReplayMarker() {
 }
 
 watch(replayIdx, updateReplayMarker);
+// A newly selected mission (detail + telemetry) draws its planned and actual paths.
+watch([missionDetail, missionSamples], renderMissionMap);
 
-function scheduleReplayStep() {
-  const i = replayIdx.value;
-  if (i >= missionSamples.value.length - 1) { stopReplay(); return; }
-  const dt = Math.max(0, (missionSamples.value[i + 1].t || 0) - (missionSamples.value[i].t || 0));
-  const interval = Math.max(16, Math.min(2000, dt / Math.max(1, replaySpeed.value)));
-  playTimer = setTimeout(() => {
-    if (!replayPlaying.value) return;
-    replayIdx.value = Math.min(missionSamples.value.length - 1, replayIdx.value + 1);
-    scheduleReplayStep();
-  }, interval);
-}
-function startReplay() {
-  if (missionSamples.value.length === 0) return;
-  if (replayIdx.value >= missionSamples.value.length - 1) replayIdx.value = 0;
-  replayPlaying.value = true;
-  scheduleReplayStep();
-}
-function stopReplay() {
-  replayPlaying.value = false;
-  if (playTimer) { clearTimeout(playTimer); playTimer = null; }
-}
-function togglePlay() { if (replayPlaying.value) stopReplay(); else startReplay(); }
-
-const currentSampleTime = computed(() => {
-  const s = missionSamples.value[replayIdx.value];
-  return s ? formatMissionTimestamp(s.t) : "—";
-});
-const currentSampleState = computed(() => missionSamples.value[replayIdx.value]?.nav_state || "—");
-const currentSampleFix = computed(() => missionSamples.value[replayIdx.value]?.fix_status || "—");
 const activeTab = ref((() => {
   let v = loadPref("activeTab", "courses");
   // Migrate stale tab keys from the pre-merge layout.
@@ -876,17 +530,6 @@ const inspectorResizing = ref(false);
 // (one map instance). Snapped to {0,90,180,270} so the button always lands on a
 // clean quarter-turn after a reload.
 const mapBearing = ref(((Number(loadPref("mapBearing", 0, Number)) % 360) + 360) % 360);
-
-function loadPref(key, fallback, parse = (x) => x) {
-  try {
-    const raw = localStorage.getItem(`mapview.${key}`);
-    if (raw === null) return fallback;
-    return parse(raw);
-  } catch { return fallback; }
-}
-function savePref(key, value) {
-  try { localStorage.setItem(`mapview.${key}`, String(value)); } catch {}
-}
 
 watch(activeTab, (v) => savePref("activeTab", v));
 watch(historyView, (v) => savePref("historyView", v));
@@ -926,77 +569,11 @@ watch(activeTab, (next, prev) => {
 });
 watch(inspectorWidth, (v) => savePref("inspectorWidth", v));
 
-/* ── GPS 관리 (수신기 소스 선택 + base station 측량점) ─────────────────── */
-// The GPS unit's own mode; the rover's correction source lives on the rover.
-const gpsUnitConfig = ref({ mode: "capture", active_base_point_id: null, ntrip_username: "", caster: null });
-// What the GPS tab shows: "base" while the rover takes corrections from the
-// unit's caster; the active point only while the unit is a base station.
-const gpsConfig = computed(() => ({
-  ntrip_source: roverStatus.value.ntrip_source?.source === "caster" ? "base" : "ngii",
-  active_base_point_id: gpsUnitConfig.value.mode === "base" ? gpsUnitConfig.value.active_base_point_id : null,
-}));
-const surveyPoints = ref([]);
-const gpsSaving = ref(false);
+/* ── GPS unit panel ───────────────────────────────── */
 const newSurveyName = ref("");
-const surveyDuration = ref(60); // fixed base-station survey window (no UI selector)
-const selectedBasePointId = ref(null);
 // Survey point whose card the operator tapped to center the map on it (list
 // highlight). Cleared when its point disappears from the list.
 const selectedSurveyPointId = ref(null);
-
-// The GPS unit's receiver in the shape the GPS tab renders. "online" means the
-// unit answers; "connected" also needs its receiver serial link.
-const receiver = computed(() => {
-  const s = gpsStatus.value;
-  if (!s) return null;
-  return {
-    online: gpsOnline.value,
-    connected: gpsOnline.value && s.receiver_connected !== false,
-    mode: s.mode,
-    fix_status: s.fix_status,
-    last_position: s.last_position ? { lat: s.last_position.lat, lng: s.last_position.lng, alt: s.last_position.alt } : null,
-    last_position_at: s.last_position?.at ?? 0,
-    ntrip_connected: s.ntrip_connected,
-    ntrip: s.ntrip,
-    gps: s.gps,
-    base: s.base,
-  };
-});
-const receiverConnected = computed(() => !!receiver.value?.connected);
-const baseState = computed(() => receiver.value?.base?.state || "idle");
-const surveyingPointId = computed(() =>
-  baseState.value === "surveying" ? (receiver.value?.base?.point_id ?? null) : null);
-
-// Live survey progress (1Hz via uiTick) from receiver.base.survey — elapsed /
-// remaining / percent of the survey window. null when not surveying.
-const surveyProgress = computed(() => {
-  uiTick.value;
-  const s = receiver.value?.base?.survey;
-  if (!s || !s.started_at || !s.duration_s) return null;
-  const elapsed = Math.max(0, (Date.now() - s.started_at) / 1000);
-  return {
-    pct: Math.min(100, Math.round((elapsed / s.duration_s) * 100)),
-    remaining: Math.max(0, Math.ceil(s.duration_s - elapsed)),
-    elapsed: Math.floor(elapsed),
-    duration: s.duration_s,
-    samples: s.samples ?? 0,
-  };
-});
-
-// Receiver position / NTRIP-correction ages (1Hz via uiTick), mirroring the
-// rover's lastPositionAge / ntripCorrectionAge for the UPDATE / FIXED rows.
-const receiverPositionAge = computed(() => {
-  uiTick.value;
-  const at = receiver.value?.last_position_at;
-  if (!at) return null;
-  return Math.max(0, Math.round((Date.now() - at) / 1000));
-});
-const receiverCorrectionAge = computed(() => {
-  uiTick.value;
-  const n = receiver.value?.ntrip;
-  if (!n?.last_correction_at) return null;
-  return Math.max(0, Math.round(Date.now() / 1000 - n.last_correction_at));
-});
 
 // Receiver GPS detail — the SAME rows, order, and value tones as the rover's
 // fix-chip popover, rendered inline with the popover's key/value grid style. The
@@ -1008,7 +585,7 @@ const receiverGpsRows = computed(() => {
   // Device (network) connection as the first row — same grid style as the GPS rows.
   const rows = [["DEVICE", online ? "ONLINE" : "OFFLINE", online ? "ok" : "bad"]];
   if (!online) return rows;
-  rows.push(versionRow("VERSION", gpsStatus.value?.device?.version));
+  rows.push(versionRow("VERSION", gps.gpsStatus.value?.device?.version));
   if (!r.connected) {
     rows.push(["RECEIVER", "DISCONNECTED", "bad"]);
     return rows;
@@ -1048,48 +625,6 @@ const receiverGpsRows = computed(() => {
   }
   return rows;
 });
-// Only surveyed points (with recorded coordinates) can serve as a base station.
-const surveyedPoints = computed(() => surveyPoints.value.filter((p) => p.lat != null && p.lng != null));
-const hasSurveyedPoint = computed(() => surveyedPoints.value.length > 0);
-
-// The rover takes corrections from the GPS unit's caster but the unit is not a
-// live base station → the rover silently drops from RTK-fixed to standalone.
-// Surface it loudly: a persistent GPS-tab banner + a toast when it first happens.
-const baseNoReceiver = computed(() =>
-  roverStatus.value.ntrip_source?.source === "caster"
-  && !(receiver.value?.connected && receiver.value.mode === "base"));
-watch(baseNoReceiver, (now, prev) => {
-  // Admin-only feature: only the operator who can set/fix the base source should
-  // get this toast (the persistent banner lives in the admin GPS tab anyway).
-  if (now && !prev && canOperateRover.value) {
-    notifyWarn("The GPS unit is not connected. RTK corrections are not reaching the rover.");
-  }
-});
-
-// Keep the base-point dropdown pinned to the configured active point, else the
-// first surveyed point, so switching to "base" always has a valid selection.
-watch([gpsConfig, surveyedPoints], () => {
-  if (gpsConfig.value.active_base_point_id != null) {
-    selectedBasePointId.value = gpsConfig.value.active_base_point_id;
-  } else if (selectedBasePointId.value == null && surveyedPoints.value.length) {
-    selectedBasePointId.value = surveyedPoints.value[0].id;
-  }
-}, { deep: true });
-
-async function loadGps() {
-  if (!host.devices.transport("gps")) return;
-  try {
-    const [cfgRes, spRes] = await Promise.all([
-      gpsRequest("/api/gps/config"),
-      gpsRequest("/api/gps/survey-points"),
-    ]);
-    gpsUnitConfig.value = await cfgRes.json();
-    surveyPoints.value = await spRes.json();
-  } catch (err) {
-    notifyError(err.message || "Failed to load GPS settings.");
-  }
-}
-
 // NGII logins, one per device. Each field follows the device's saved value and
 // is sent when the operator saves it ("" clears the login).
 const roverNgiiLogin = ref("");
@@ -1102,13 +637,7 @@ async function saveNgiiLogin(kind) {
   const username = (kind === "rover" ? roverNgiiLogin : gpsNgiiLogin).value.trim();
   ngiiLoginSaving.value = true;
   try {
-    if (kind === "rover") {
-      const res = await roverRequest("/api/rover/ntrip-username", { method: "PUT", body: JSON.stringify({ username }) });
-      roverStatus.value = { ...roverStatus.value, ntrip_username: (await res.json()).username };
-    } else {
-      const res = await gpsRequest("/api/gps/ntrip-username", { method: "PUT", body: JSON.stringify({ username }) });
-      gpsUnitConfig.value = await res.json();
-    }
+    await (kind === "rover" ? rover : gps).setNtripUsername(username);
     const device = kind === "rover" ? "rover" : "GPS unit";
     notifySuccess(username ? `Saved the ${device}'s NGII login.` : `Cleared the ${device}'s NGII login.`);
   } catch (err) {
@@ -1118,106 +647,25 @@ async function saveNgiiLogin(kind) {
   }
 }
 
-async function setRoverCorrectionSource(body) {
-  const res = await roverRequest("/api/rover/ntrip-source", { method: "PUT", body: JSON.stringify(body) });
-  roverStatus.value = { ...roverStatus.value, ntrip_source: await res.json() };
-}
-
-async function setGpsUnitMode(mode, activeBasePointId) {
-  const res = await gpsRequest("/api/gps/config", {
-    method: "PUT",
-    body: JSON.stringify({ mode, active_base_point_id: activeBasePointId }),
-  });
-  gpsUnitConfig.value = await res.json();
-}
-
-// A base station takes two steps on two devices: the unit becomes a caster at a
-// surveyed point, then the rover takes its corrections from that caster.
-async function setNtripSource(source, pointId = null) {
-  const roverAvailable = host.devices.transport("rover") != null;
-  gpsSaving.value = true;
-  try {
-    if (source === "base") {
-      const pid = pointId ?? selectedBasePointId.value ?? gpsUnitConfig.value.active_base_point_id;
-      if (pid == null) { notifyError("Select a survey point first."); return; }
-      const gpsDevice = host.devices.selected("gps");
-      if (!gpsDevice) { notifyError("No GPS unit is configured."); return; }
-      await setGpsUnitMode("base", pid);
-      if (roverAvailable) {
-        // The rover pins public DNS, so it reaches the caster by tailnet IP.
-        const { host: casterHost, port, mountpoint } = gpsUnitConfig.value.caster || {};
-        if (!casterHost) throw new Error("The GPS unit has no tailnet address yet. Check its Tailscale connection.");
-        await setRoverCorrectionSource({ source: "caster", host: casterHost, port, mountpoint });
-      }
-      notifySuccess("Set the GPS unit as the base station.");
-    } else {
-      if (roverAvailable) await setRoverCorrectionSource({ source: "ngii" });
-      if (gpsUnitConfig.value.mode === "base") await setGpsUnitMode("capture", null);
-      notifySuccess("Switched corrections to NGII.");
-    }
-  } catch (err) {
-    notifyError(err.message || "Failed to change the GPS source.");
-  } finally {
-    gpsSaving.value = false;
-  }
-}
-
 async function addSurveyPoint() {
   const name = newSurveyName.value.trim();
   if (!name) return;
-  try {
-    await gpsRequest("/api/gps/survey-points", { method: "POST", body: JSON.stringify({ name }) });
-    newSurveyName.value = "";
-    await loadGps();
-  } catch (err) {
-    notifyError(err.message || "Failed to add the survey point.");
-  }
+  if (await gps.addSurveyPoint(name)) newSurveyName.value = "";
 }
 
 async function deleteSurveyPoint(p) {
   if (!window.confirm(`Delete survey point "${p.name}"?`)) return;
-  try {
-    await gpsRequest(`/api/gps/survey-points/${p.id}`, { method: "DELETE" });
-    if (selectedSurveyPointId.value === p.id) selectedSurveyPointId.value = null;
-    await loadGps();
-  } catch (err) {
-    notifyError(err.message || "Failed to delete the survey point.");
-  }
+  if (await gps.deleteSurveyPoint(p) && selectedSurveyPointId.value === p.id) selectedSurveyPointId.value = null;
 }
 
-async function startSurvey(p) {
-  try {
-    await gpsRequest(`/api/gps/survey-points/${p.id}/survey`, {
-      method: "POST",
-      body: JSON.stringify({ duration_s: surveyDuration.value }),
-    });
-    notifySuccess(`Started surveying "${p.name}".`);
-  } catch (err) {
-    notifyError(err.message || "Failed to start the survey.");
-  }
-}
-
-async function cancelSurvey(p) {
-  try {
-    await gpsRequest(`/api/gps/survey-points/${p.id}/survey/cancel`, { method: "POST" });
-  } catch (err) {
-    notifyError(err.message || "Failed to cancel the survey.");
-  }
-}
-
-// Auto-refresh (no manual button): reload on survey completion, on receiver
-// (re)connect, and on GPS-tab entry — whenever state relevant to the tab changes.
-watch(baseState, (now, prev) => {
-  // Admin-only: base.state rides rover:status to every operator, but loadGps()
-  // hits admin-only /api/gps/* (a non-admin would just get 403 + an error toast).
-  if (prev === "surveying" && now !== "surveying" && canOperateRover.value) loadGps();
-});
+// Reload the unit's configuration on receiver (re)connect and on GPS-tab entry
+// (the store reloads it on survey completion).
 // The GPS unit's live marker follows its own status stream.
 watch(receiver, () => syncReceiverMarker());
 watch(receiverConnected, (now, prev) => {
-  if (now && !prev && activeTab.value === "gps" && canOperateRover.value) loadGps();
+  if (now && !prev && activeTab.value === "gps" && canOperateRover.value) gps.loadConfig();
 });
-watch(activeTab, (v) => { if (v === "gps" && canOperateRover.value) loadGps(); });
+watch(activeTab, (v) => { if (v === "gps" && canOperateRover.value) gps.loadConfig(); });
 
 // Tab-swap: hide live layers when entering the missions sub-view of the
 // history tab, tear down replay state and restore the live view when leaving.
@@ -1227,16 +675,13 @@ const isMissionsView = computed(
 watch(isMissionsView, (next, prev) => {
   if (next === prev || !map) return;
   if (prev) {
-    stopReplay();
+    review.clearSelection();
     clearMissionMap();
-    selectedMissionId.value = null;
-    missionDetail.value = null;
-    missionSamples.value = [];
     restoreLiveMapLayers();
   }
   if (next) {
     hideLiveMapLayers();
-    loadMissions();
+    review.loadMissions();
   }
 });
 
@@ -1274,7 +719,6 @@ function onInspectorResizeEnd(e) {
 
 // Mobile bottom sheet (narrow viewports) — rail becomes a bottom tab bar.
 const isMobile = ref(false);
-const sheetExpanded = ref(false);
 const sheetHeight = ref(52); // px — 52 = collapsed (handle only)
 const sheetDragging = ref(false);
 let dragStartY = 0;
@@ -1323,7 +767,6 @@ function onSheetTouchEnd() {
   } else if (sheetHeight.value < 100) {
     sheetHeight.value = 52;
   }
-  sheetExpanded.value = sheetHeight.value > 52;
 }
 
 let map = null;
@@ -1336,28 +779,6 @@ let surveyPointLayer = null;   // L.layerGroup of surveyed base-station point ma
 let pathLine = null;
 let pathStartMarker = null;
 let pathEndMarker = null;
-let pathStart = null; // { lat, lng } — preserved across compute/execute/resume for re-rendering
-let pathReturnOrigin = null; // fixed origin for an empty return-only leg; never chase live GPS while rendering
-let pathCumDist = []; // cumulative distance to each waypoint from start (length = pathWaypoints.value.length)
-let pathTotalDist = 0; // total distance including return-to-start segment
-let executionStartIdx = 0; // global waypoint index the current execute/resume call started from
-let displayedMissionId = null;
-let displayedMissionAuthorityKey = null;
-let pathMissionBase = null;
-let localMissionCreatePending = false;
-let localMissionRouteGeneration = 0;
-let localMissionCreateRequestSeq = 0;
-let roverStatusMissionRequestSeq = 0;
-let activeMissionSnapshotRequestSeq = 0;
-let activeMissionSnapshotRequestKey = null;
-let missionMutationRequestSeq = 0;
-let missionAuthorityGeneration = 0;
-const activeMissionAuthority = ref(null);
-let observedMissionAuthorityKey = missionAuthorityKey(null);
-const terminalMissionIds = new Set();
-let eventStreams = [];
-let controlInterval = null;
-const pendingManualControlRequests = new Set();
 let suppressRebuild = false;
 let coneRenderer = null;       // shared <canvas> renderer for cone dots (rover/history tabs)
 let followTimer = null;        // throttle handle: at most one follow-pan per FOLLOW_MIN_MS
@@ -1424,266 +845,11 @@ watch([inspectorWidth, sheetHeight, isMobile], () => {
 }, { flush: "pre" });
 
 /* ── Computed ──────────────────────────────────────── */
-const activeCourse = computed(() => courses.value.find((c) => c.id === activeCourseId.value));
-const activeMission = computed(() => roverStatus.value.active_mission || null);
-const missionHeld = computed(() => missionMotionConfirmedHeld(activeMissionAuthority.value));
-
-function rememberTerminalMission(id) {
-  if (!Number.isInteger(id)) return;
-  terminalMissionIds.add(id);
-  if (terminalMissionIds.size > 128) terminalMissionIds.delete(terminalMissionIds.values().next().value);
-}
-
-function observeMissionAuthority(mission, { advanceAuthority = true } = {}) {
-  const nextKey = missionAuthorityKey(mission);
-  if (nextKey == null) return false;
-  if (advanceAuthority && nextKey !== observedMissionAuthorityKey) missionAuthorityGeneration += 1;
-  activeMissionAuthority.value = mission;
-  observedMissionAuthorityKey = nextKey;
-  const awaiting = missionEndAwaitingState({
-    awaitingMissionId: missionEndAwaitingAckId.value,
-    awaitingCommandId: missionEndAwaitingCommandId.value,
-    authorityMission: mission,
-  });
-  missionEndAwaitingAckId.value = awaiting.missionId;
-  missionEndAwaitingCommandId.value = awaiting.commandId;
-  return true;
-}
-
-function beginMissionAuthorityRequest(mission = activeMissionAuthority.value) {
-  const token = captureMissionAuthorityRequest({
-    requestId: ++missionMutationRequestSeq,
-    authorityGeneration: missionAuthorityGeneration,
-    mission,
-  });
-  if (!token) {
-    throw Object.assign(new Error("Cannot confirm the current mission authority. Reload the latest state."), {
-      reason: "mission_authority_unavailable",
-    });
-  }
-  return token;
-}
-
-function missionAuthorityRequestIsCurrent(token) {
-  return missionAuthorityRequestCanApply({
-    token,
-    latestRequestId: missionMutationRequestSeq,
-    currentAuthorityGeneration: missionAuthorityGeneration,
-    currentMission: activeMissionAuthority.value,
-  });
-}
-
-function missionAuthorityFenceIsCurrent(token) {
-  return missionAuthorityFenceMatches({
-    token,
-    currentAuthorityGeneration: missionAuthorityGeneration,
-    currentMission: activeMissionAuthority.value,
-  });
-}
-
-function currentMissionAuthorityFence(mission = activeMissionAuthority.value) {
-  return captureMissionAuthorityFence({
-    authorityGeneration: missionAuthorityGeneration,
-    mission,
-  });
-}
-
-function resolveMissionHttpSnapshot(responseMission, token, options = {}) {
-  const decision = missionHttpResponseAuthorityDecision({
-    token,
-    latestRequestId: missionMutationRequestSeq,
-    currentAuthorityGeneration: missionAuthorityGeneration,
-    currentMission: activeMissionAuthority.value,
-    responseMission,
-    terminalMissionIds,
-  });
-  if (decision.installResponse) {
-    installActiveMissionSnapshot(responseMission, options);
-    return responseMission;
-  }
-  if (decision.responseMatchesCurrent
-      && missionAuthorityKey(activeMission.value) === missionAuthorityKey(responseMission)) {
-    return activeMission.value;
-  }
-  reconcileRoverMode(roverStatus.value);
-  return null;
-}
-
-function missionAuthorityAdvancedError(token) {
-  return Object.assign(new Error("The mission changed during the request. Check the latest state."), {
-    reason: "mission_authority_advanced",
-    missionAuthorityRequestToken: token,
-  });
-}
-
-function invalidateLocalMissionRouteAuthority() {
-  localMissionRouteGeneration += 1;
-}
-const emergencyStopLatched = computed(() =>
-  roverStatus.value.nav_state === "EMERGENCY_STOP" || roverStatus.value.stop_requested === true);
-const pathButtonDisabled = computed(() => missionPathActionDisabled({
-  activeConeCount: activeCones.value.length,
-  activeMission: activeMission.value,
-  roverMode: roverMode.value,
-  stopping: stopping.value,
-  emergencyStopped: emergencyStopLatched.value,
-}));
-
-const pathBtnLabel = computed(() => {
-  // 글로벌 비상정지 래치가 잡혀 있는 동안에는 모든 미션 버튼이 정지 명령이
-  // 텔레메트리로 확인될 때까지 같은 상태로 보여야 운영자가 두 버튼을 보고
-  // 모순된 단계로 오해하지 않는다.
-  if (stopping.value && (roverMode.value === "executing" || roverMode.value === "stopped")) {
-    return "Requesting stop...";
-  }
-  if (emergencyStopLatched.value && (roverMode.value === "stopped" || roverMode.value === "path-ready")) {
-    return "Release E-stop first";
-  }
-  if (roverMode.value === "executing") {
-    // 일시정지 중에는 메인 버튼이 상태만 표시하고, 재개는 전용 버튼이 담당.
-    if (roverStatus.value.nav_state === "PAUSED") return "Paused";
-    // executePath 직후 nav_state 가 IDLE 인 ~수초 동안은 0% 가 아니라
-    // "Requesting start..." 로 노출. rover 가 CALIBRATING 으로 들어가면 화해 함수가
-    // 진행률 라벨을 자동 갱신.
-    if (!ACTIVE_NAV_STATES.has(roverStatus.value.nav_state)) return "Requesting start...";
-    return `Running ${pathProgress.value}%`;
-  }
-  if (roverMode.value === "stopped") return activeMission.value?.status === "ready" ? "Start mission" : "Resume mission";
-  if (roverMode.value === "path-ready") return "Run route";
-  if (roverMode.value === "path-pick") return "Cancel planning";
-  return "Plan route";
-});
-
-const pathBtnClass = computed(() => {
-  if (roverMode.value === "executing") return "btn-primary";
-  if (roverMode.value === "stopped") return "btn-primary";
-  if (roverMode.value === "path-ready") return "btn-primary";
-  if (roverMode.value === "path-pick") return "btn-danger";
-  return "btn-ghost";
-});
-// Tracks which check keys flipped recently — used to flash the row so the
-// operator notices RTK/NTRIP degrading mid-modal instead of acting on stale info.
-const preflightFlash = ref({});
-
-// Pre-flight checklist derived from current rover state + planned path.
-const preflightChecks = computed(() => {
-  const s = roverStatus.value;
-  const wps = pathWaypoints.value;
-  // Resume always starts at the first server-authoritative pending occurrence;
-  // an empty return-only mission instead checks the current-to-start leg, while
-  // an uncertainty resolution explicitly performs no motion.
-  const targetDecision = missionPreflightTarget({
-    mode: preflightMode.value,
-    waypoints: wps,
-    finishBehavior: missionFinishBehavior.value,
-    missionStart: activeMission.value?.start_position,
-    emptyRouteMode: preflightEmptyRouteMode.value,
-  });
-  const first = targetDecision.target;
-  const firstDist = first && s.last_position
-    ? haversine({ lat: s.last_position.lat, lng: s.last_position.lng }, first)
-    : null;
-  const batteryOk = !s.battery || s.battery.percent == null || s.battery.percent > BATTERY_WARN_PERCENT;
-  const resolvingUncertain = targetDecision.kind === "resolve_uncertain";
-  const returningOnly = targetDecision.kind === "return_only";
-  const routeCheck = missionPreflightRouteCheck({
-    mode: preflightMode.value === "execute" ? "execute" : "resume",
-    waypoints: wps,
-    finishBehavior: missionFinishBehavior.value,
-    returnPoint: activeMission.value?.start_position || s.last_position,
-  });
-  return [
-    { key: "connected", label: "Rover SSE connection", ok: !!s.connected, blocking: true },
-    { key: "estop", label: "E-stop released", ok: !emergencyStopLatched.value, blocking: true,
-      detail: emergencyStopLatched.value ? "E-stop is latched. Check the physical state, then release it." : "Released" },
-    { key: "protocol", label: "Mission protocol v2", ok: s.mission_protocol?.compatible === true, blocking: true,
-      detail: s.mission_protocol?.connected == null
-        ? "Version not received"
-        : `rover v${s.mission_protocol.connected} / required v${s.mission_protocol.required}` },
-    { key: "fix", label: "RTK Fixed GPS", ok: s.fix_status === "rtk_fixed",
-      detail: s.fix_status ? s.fix_status.replace(/_/g, " ").toUpperCase() : "Unknown" },
-    { key: "ntrip", label: "NTRIP connection", ok: s.ntrip_connected === true,
-      detail: (() => {
-        if (s.ntrip_connected === null) return "Unknown";
-        const caster = s.ntrip?.host ? `${s.ntrip.host}${s.ntrip.mountpoint ? '/' + s.ntrip.mountpoint : ''}` : null;
-        if (s.ntrip_connected) return caster ? `${caster} · ok` : "ok";
-        const retry = s.ntrip?.fail_count ? ` · retries ${s.ntrip.fail_count}` : "";
-        return caster ? `${caster} · off${retry}` : `off${retry}`;
-      })() },
-    { key: "firstwp", label: resolvingUncertain ? "Resolve uncertain dispense result"
-      : (returningOnly ? "Distance to start point" : "Distance to first waypoint"),
-      ok: missionPreflightDistanceAllowed({ kind: targetDecision.kind, distance: firstDist }),
-      detail: resolvingUncertain ? "The operator resolves the uncertain result without further movement or dispensing."
-        : (firstDist != null ? `${firstDist.toFixed(1)} m${returningOnly ? " · mission start point" : ""}` : "No position received") },
-    { key: "route", label: "Route segment distance", ok: routeCheck.ok,
-      detail: routeCheck.ok ? "All segments within 50 m"
-        : (Number.isFinite(routeCheck.distance)
-          ? `${routeCheck.reason === "return_segment_too_long" ? "Return segment" : `To cone ${routeCheck.index + 1}`}: ${routeCheck.distance.toFixed(1)} m`
-          : "Check route coordinates") },
-    { key: "battery", label: "Battery", ok: batteryOk,
-      detail: s.battery && s.battery.percent != null ? `${s.battery.percent}%` : "Not received" },
-  ];
-});
-const preflightAllOk = computed(() => preflightChecks.value.every((c) => c.ok));
-const preflightHasBlockingFailure = computed(() =>
-  preflightChecks.value.some((check) => check.blocking === true && !check.ok));
-const preflightCanConfirm = computed(() =>
-  missionPreflightCanConfirm(preflightChecks.value, preflightForce.value));
-
-// Flash a check row when it changes ok-state during an open modal so the
-// operator sees the transition even if they're focused on the button.
-let lastPreflightOk = {};
-watch(preflightChecks, (next) => {
-  if (!showPreflight.value) {
-    lastPreflightOk = Object.fromEntries(next.map((c) => [c.key, c.ok]));
-    return;
-  }
-  const flashes = {};
-  for (const c of next) {
-    const prev = lastPreflightOk[c.key];
-    if (prev !== undefined && prev !== c.ok) flashes[c.key] = Date.now();
-    if (c.blocking === true && !c.ok) preflightForce.value = false;
-  }
-  lastPreflightOk = Object.fromEntries(next.map((c) => [c.key, c.ok]));
-  if (Object.keys(flashes).length > 0) {
-    preflightFlash.value = { ...preflightFlash.value, ...flashes };
-    // Clear the flash class after the animation completes so a second
-    // transition can re-trigger it.
-    setTimeout(() => {
-      const stale = Date.now() - 1200;
-      preflightFlash.value = Object.fromEntries(
-        Object.entries(preflightFlash.value).filter(([, at]) => at > stale)
-      );
-    }, 1300);
-  }
-}, { deep: true });
-
-watch(showPreflight, (open) => {
-  if (open) {
-    lastPreflightOk = Object.fromEntries(preflightChecks.value.map((c) => [c.key, c.ok]));
-    preflightFlash.value = {};
-  }
-});
-
-const activeCones = computed(() => conesMap.value[activeCourseId.value] || []);
 const filteredCones = computed(() => {
   if (coneFilter.value === "all") return activeCones.value;
   return activeCones.value.filter((c) => c.side === coneFilter.value);
 });
 
-// 메모는 콘 숨김(visibility)과 무관하다 — 코스가 선택돼 있으면 항상 그린다.
-const activeMemos = computed(() => {
-  const id = activeCourseId.value;
-  if (!id) return [];
-  return memosMap.value[id] || [];
-});
-
-const activeRoute = computed(() => routeMap.value[activeCourseId.value] || { markers: [], steps: [] });
-const routeMarkerById = computed(() => new Map(activeRoute.value.markers.map((marker) => [marker.id, marker])));
-// Two or more visits mean the markers, not the stored course row, decide the
-// start and the travel direction — whether they merely orient the loop or need
-// the marker router. `routeMode` records which of the two actually ran.
-const hasMarkerRoute = computed(() => activeRoute.value.steps.length >= 2);
 // An oriented route is still the automatic centerline; only saying "Marker route"
 // there would suggest the marker router drew it.
 const ROUTE_MODE_LABEL = {
@@ -1699,75 +865,10 @@ const ROUTE_MODE_SUFFIX = {
 };
 const routeModeSuffix = computed(() => ROUTE_MODE_SUFFIX[routeMode.value] ?? "");
 
-async function fetchRoute(courseId) {
-  if (!courseId) return;
-  try {
-    const res = await courseRequest(`/api/courses/${courseId}/route`);
-    routeMap.value[courseId] = await res.json();
-  } catch (err) {
-    notifyError(err.message);
-  }
-}
-
-async function addRouteMarker(lat, lng) {
-  const courseId = activeCourseId.value;
-  if (!courseId) return;
-  try {
-    const n = activeRoute.value.markers.length + 1;
-    await courseRequest(`/api/courses/${courseId}/route/markers`, {
-      method: "POST",
-      body: JSON.stringify({ lat, lng, label: `M${n}` }),
-    });
-    await fetchRoute(courseId);
-  } catch (err) { notifyError(err.message); }
-}
-
-async function updateRouteMarker(marker, patch) {
-  try {
-    await courseRequest(`/api/route/markers/${marker.id}`, { method: "PATCH", body: JSON.stringify(patch) });
-    await fetchRoute(marker.course_id);
-  } catch (err) {
-    notifyError(err.message);
-    const current = routeMap.value[marker.course_id] || { markers: [], steps: [] };
-    routeMap.value[marker.course_id] = { markers: current.markers.map((item) => ({ ...item })), steps: current.steps.slice() };
-  }
-}
-
+// Deleting a marker also deletes all of its visits.
 async function deleteRouteMarker(marker) {
   if (!confirm(`Delete route marker "${marker.label || marker.id}" and all of its visits?`)) return;
-  try {
-    const res = await courseRequest(`/api/route/markers/${marker.id}`, { method: "DELETE" });
-    routeMap.value[marker.course_id] = await res.json();
-  } catch (err) { notifyError(err.message); }
-}
-
-async function saveRouteSteps(steps) {
-  const courseId = activeCourseId.value;
-  if (!courseId) return;
-  try {
-    const res = await courseRequest(`/api/courses/${courseId}/route/steps`, {
-      method: "PUT", body: JSON.stringify({ steps }),
-    });
-    routeMap.value[courseId] = await res.json();
-  } catch (err) { notifyError(err.message); }
-}
-
-function appendRouteVisit(markerId) {
-  saveRouteSteps([...activeRoute.value.steps, markerId]);
-}
-
-function moveRouteVisit(index, delta) {
-  const steps = activeRoute.value.steps.slice();
-  const target = index + delta;
-  if (target < 0 || target >= steps.length) return;
-  [steps[index], steps[target]] = [steps[target], steps[index]];
-  saveRouteSteps(steps);
-}
-
-function removeRouteVisit(index) {
-  const steps = activeRoute.value.steps.slice();
-  steps.splice(index, 1);
-  saveRouteSteps(steps);
+  await course.deleteRouteMarker(marker);
 }
 
 function toggleRouteEditMode() {
@@ -1810,48 +911,8 @@ const selectedCone = computed(() =>
   selectedConeId.value ? activeCones.value.find((c) => c.id === selectedConeId.value) : null
 );
 
-/* ── Course centerline (ported from centerline.py → course/centerline.mjs) ──
-   Computed client-side from the active course's cones; the toggle only controls
-   the on-map graphic, not the (always-computed) header length. Recompute is
-   debounced and rides cone/course changes (edit commit / SSE), never mid-drag. */
-function scheduleCenterline() {
-  if (centerlineTimer) clearTimeout(centerlineTimer);
-  centerlineTimer = setTimeout(recomputeCenterline, 250);
-}
-// Start-point + direction options for a course, shared by the on-map graphic and
-// the ZIP export so they always agree. start = the station nearest the chosen
-// cone; reverse = flipped travel direction.
-function courseDirOpts(courseId, cones) {
-  const course = courses.value.find((c) => c.id === courseId);
-  return course ? courseDirectionOptions(course, cones) : {};
-}
-function recomputeCenterline() {
-  centerlineTimer = null;
-  const cones = activeCones.value;
-  routeError.value = "";
-  if (cones.length < 6) {
-    centerline.value = null;
-    routeMode.value = ROUTE_MODE.AUTO;
-  } else {
-    // resolveCourseRoute picks the engine: markers that only orient one loop keep
-    // the established centerline path (start/reverse derived from them), markers
-    // that re-use pavement go to the router. Courses with no markers fall back to
-    // the stored course row, so nothing changes until markers are placed.
-    try {
-      const resolved = resolveCourseRoute(cones, activeRoute.value.markers, activeRoute.value.steps, {
-        step: 1.0,
-        fallback: courseDirOpts(activeCourseId.value, cones),
-      });
-      centerline.value = resolved.centerline;
-      routeMode.value = resolved.mode;
-    } catch (err) {
-      centerline.value = null;
-      routeMode.value = ROUTE_MODE.GUIDED;
-      routeError.value = err?.message || String(err);
-    }
-  }
-  drawCenterline();
-}
+/* ── Course centerline ─────────────────────────────── */
+// The course store computes the centerline; the toggle only controls this graphic.
 function drawCenterline() {
   if (centerlineLayer) { try { map.removeLayer(centerlineLayer); } catch {} centerlineLayer = null; }
   if (!map || activeTab.value !== "courses" || !showCenterline.value || !centerline.value?.ok) return;
@@ -1863,80 +924,20 @@ watch(showCenterline, (v) => {
   drawCenterline();
   rebuildRouteMarkers();
 });
-watch(activeCones, scheduleCenterline);
-watch(activeRoute, () => {
-  scheduleCenterline();
-  rebuildRouteMarkers();
-}, { deep: true });
+watch(centerline, drawCenterline);
+watch(activeRoute, rebuildRouteMarkers, { deep: true });
 watch(activeTab, drawCenterline);
-// Start/direction now live on the server course row. Recompute the centerline
-// whenever the active course's reverse/start changes — this client's own edit or
-// another operator's, both echoed through the 'courses' SSE broadcast.
-watch(
-  () => {
-    const c = courses.value.find((cc) => cc.id === activeCourseId.value);
-    return c ? `${c.reverse}|${c.start_cone_id}` : "";
-  },
-  scheduleCenterline,
-);
-// (course switches already recompute via the activeCones watcher above, which
-//  reads the newly-active course's stored start/direction.)
 
 // The currently selected cone is this course's start line.
 const isStartCone = computed(() =>
   selectedConeId.value != null && activeCourse.value?.start_cone_id === selectedConeId.value
 );
-// Persist start/direction to the server course row, applying the change to local
-// state IMMEDIATELY (before the round-trip) so the toggle button and on-map arrow
-// respond on tap and a rapid second tap toggles from the new state — the PATCH and
-// the 'courses' SSE echo that reconciles other clients can lag on a flaky field
-// link. Only the field(s) being changed are touched (reverse stored 0/1 to match
-// the server row), so a concurrent SSE echo updating the other field isn't
-// clobbered. On failure, roll back just those field(s).
-async function saveCourseDirection(id, patch) {
-  const i = courses.value.findIndex((c) => c.id === id);
-  if (i < 0) return;
-  const before = courses.value[i];
-  const next = { ...before };
-  if ("reverse" in patch) next.reverse = patch.reverse ? 1 : 0;
-  if ("start_cone_id" in patch) next.start_cone_id = patch.start_cone_id;
-  courses.value[i] = next;
-  try {
-    await courseRequest(`/api/courses/${id}/direction`, {
-      method: "PATCH",
-      body: JSON.stringify(patch),
-    });
-  } catch (err) {
-    const j = courses.value.findIndex((c) => c.id === id);
-    if (j >= 0) {
-      const rolled = { ...courses.value[j] };
-      if ("reverse" in patch) rolled.reverse = before.reverse;
-      if ("start_cone_id" in patch) rolled.start_cone_id = before.start_cone_id;
-      courses.value[j] = rolled;
-    }
-    notifyWarn(err.message || "Failed to save the travel direction.");
-  }
-}
 // Set the selected cone as the start (or clear it back to the auto start gate).
 function setStartCone() {
-  const id = activeCourseId.value;
-  if (id == null || selectedConeId.value == null) return;
-  // toggle off -> null (auto gate) if this cone is already the start
-  const next = activeCourse.value?.start_cone_id === selectedConeId.value ? null : selectedConeId.value;
-  saveCourseDirection(id, { start_cone_id: next });
+  course.toggleStartCone(selectedConeId.value);
 }
-// Travel direction is no longer a separate toggle: the marker visit order is the
-// only way to set it. `course.reverse` stays readable for courses that predate
-// markers (applied through courseDirOpts) and is still written by the import path.
 
 /* ── Icon helpers ──────────────────────────────────── */
-// Per-side #N for each cone of the active course, precomputed once (O(n)) into a
-// Map for O(1) lookup. Replaces coneSideIndex()'s per-cone find+filter, which was
-// O(n²) per render and re-ran on every map pan (via mapFrame). Recomputes only
-// when the active course's cones change. Imperative marker code that needs ranks
-// for a non-active course builds its own map with buildSideRanks(cones).
-const activeConeSideRanks = computed(() => buildSideRanks(activeCones.value));
-
 // Canvas-rendered cone for read-only contexts: the rover/history tabs and the
 // LOCKED courses tab. A coloured dot with its side-index number, matching the
 // editable DOM marker but drawn to the shared canvas (no per-cone DOM node to
@@ -2089,7 +1090,6 @@ function rebuildAllMarkers(onlyCourseId = null) {
 
             const rollbackPositions = dragStartPositions;
             // Pre-move positions for undo: the dragged cone's origin + the others'.
-            const courseId = activeCourseId.value;
             const before = [{ id: cone.id, lat: dragOrigin.lat, lng: dragOrigin.lng }];
             for (const [id, origPos] of dragStartPositions) before.push({ id, lat: origPos.lat, lng: origPos.lng });
             isMultiDragging = false;
@@ -2097,15 +1097,7 @@ function rebuildAllMarkers(onlyCourseId = null) {
             dragOrigin = null;
 
             try {
-              await Promise.all(updates.map(u =>
-                courseRequest(`/api/cones/${u.id}`, {
-                  method: "PATCH",
-                  body: JSON.stringify({ lat: u.lat, lng: u.lng }),
-                })
-              ));
-              pushUndo(`Move ${before.length} cones`, () => Promise.all(
-                before.map((b) => courseRequest(`/api/cones/${b.id}`, { method: "PATCH", body: JSON.stringify({ lat: b.lat, lng: b.lng }) }))
-              ));
+              await course.moveCones(updates, before, `Move ${before.length} cones`);
             } catch (err) {
               notifyError(`Failed to save cone position: ${err.message}`);
               marker.setLatLng([cone.lat, cone.lng]);
@@ -2122,8 +1114,7 @@ function rebuildAllMarkers(onlyCourseId = null) {
             const before = { lat: cone.lat, lng: cone.lng };
             const { lat, lng } = marker.getLatLng();
             try {
-              await courseRequest(`/api/cones/${cone.id}`, { method: "PATCH", body: JSON.stringify({ lat, lng }) });
-              pushUndo("Move cone", () => courseRequest(`/api/cones/${cone.id}`, { method: "PATCH", body: JSON.stringify({ lat: before.lat, lng: before.lng }) }));
+              await course.moveCones([{ id: cone.id, lat, lng }], [{ id: cone.id, lat: before.lat, lng: before.lng }], "Move cone");
             } catch (err) {
               notifyError(`Failed to save cone position: ${err.message}`);
               marker.setLatLng([cone.lat, cone.lng]);
@@ -2179,11 +1170,11 @@ function rebuildRouteMarkers() {
     if (interactive) {
       marker.on("click", (event) => {
         if (event.originalEvent) L.DomEvent.stopPropagation(event.originalEvent);
-        appendRouteVisit(routeMarker.id);
+        course.appendRouteVisit(routeMarker.id);
       });
       marker.on("dragend", async () => {
         const { lat, lng } = marker.getLatLng();
-        await updateRouteMarker(routeMarker, { lat, lng });
+        await course.updateRouteMarker(routeMarker, { lat, lng });
       });
     }
     marker.addTo(map);
@@ -2270,9 +1261,6 @@ watch(selectMode, (on) => {
 });
 // Filter change reflows the list — jump back to the top and hide the button.
 watch(coneFilter, () => { coneListScrolled.value = false; coneListEl.value?.scrollTo({ top: 0 }); });
-// Persist explicitly enabled overlays (course selection already persists
-// via activeCourseId). Deep watch since visibility is a per-id map.
-watch(visibility, (v) => savePref("overlays", JSON.stringify(v)), { deep: true });
 watch(selectedConeId, (id) => {
   const aid = activeCourseId.value;
   // Locked courses tab draws canvas dots (no setIcon); rebuild so the newly
@@ -2312,84 +1300,23 @@ watch(selectedConeId, (id) => {
   }
 });
 
-// 미션 취소로 코스 전환을 되돌릴 때 재할당이 이 watcher 를 다시 트리거하므로,
-// 그 1회는 플래그로 무시한다 (되돌림에 clearPath/미션 폐기가 돌면 안 된다).
-let revertingCourseSwitch = false;
-let aligningMissionCourse = false;
-
-function alignCourseToMission(mission) {
-  const nextCourseId = missionCourseId(activeCourseId.value, mission);
-  if (nextCourseId === activeCourseId.value) return;
-  if (!courses.value.some((course) => course.id === nextCourseId)) return;
-  aligningMissionCourse = true;
-  activeCourseId.value = nextCourseId;
-}
-
-watch(activeCourseId, (value, previous) => {
-  if (value !== previous) invalidateLocalMissionRouteAuthority();
-}, { flush: "sync" });
-
-watch(activeCourseId, async (v, prev) => {
-  if (revertingCourseSwitch) { revertingCourseSwitch = false; return; }
-  const missionAlignment = aligningMissionCourse;
-  aligningMissionCourse = false;
-  // 미션 진행(executing)·중단(stopped) 중의 코스 전환은 아래 clearPath() 가 서버
-  // 미션까지 폐기하는 파괴적 작업 — abandonMission 과 동일하게 반드시 확인을 받고,
-  // 취소하거나 서버 종료가 실패하면 전환 자체를 이전 코스로 되돌린다.
-  if (shouldAbandonMissionForCourseSwitch({ missionAlignment, roverMode: roverMode.value })) {
-    const revert = () => { revertingCourseSwitch = true; activeCourseId.value = prev; };
-    if (!window.confirm("Switching courses ends and discards the current mission.\nIt can no longer be resumed. Continue?")) { revert(); return; }
-    const missionId = activeMissionAuthority.value?.id;
-    if (missionId) {
-      revert();
-      if (missionEndBusy.value || missionEndAwaitingAckId.value === missionId) {
-        notifyWarn("Waiting for the rover to confirm the mission end.");
-        return;
-      }
-      missionEndBusy.value = true;
-      cancelMissionEndReconcile();
-      missionEndAwaitingAckId.value = missionId;
-      missionEndAwaitingCommandId.value = null;
-      let authorityToken = null;
-      try {
-        authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-        const response = await roverRequest(`/api/missions/${missionId}/end`, { method: "POST" });
-        const data = await response.json();
-        if (applyMissionCommandResponse(data, "end", authorityToken)) {
-          notifyWarn("Switch courses again after the rover confirms the mission end.");
-        }
-      } catch (err) {
-        await reconcileMissionEndRequestFailure(missionId);
-        notifyWarn(`Failed to end mission: ${err.message}`);
-      } finally {
-        missionEndBusy.value = false;
-      }
-      return;
-    }
-  }
+// A course switch the mission store accepted: reset the course-scoped editing
+// state and pan to the newly selected course (its start cone, else its first).
+mission.onCourseSwitch((v) => {
   if (rotateMode.value) exitRotateMode();
   if (toolMode.value !== "none") exitToolMode();
   selectMode.value = false;
   routeEditMode.value = false;
-  undoStack.value = []; // undo entries reference cone ids of the old course
+  edits.clear(); // undo entries reference cone ids of the old course
   selectedConeId.value = null;
   multiSelectedIds.value = new Set();
   coneFilter.value = "all";
   coneListScrolled.value = false;
-  missionPresets.value = [];
-  missionPresetRequestSeq += 1;
-  // A server-active mission owns both route and course. Its internal course
-  // alignment must refresh course-scoped UI without clearing or abandoning the
-  // mission path that restoreActiveMission is installing in the same tick.
-  if (!missionAlignment) clearPath();
   if (map) {
     rebuildAllMarkers();
     rebuildRouteMarkers();
   }
   if (v != null) {
-    savePref("activeCourseId", v);
-    // Pan to the newly selected course so the operator doesn't hand-pan: the
-    // designated start cone if one is set, else the first cone in the data.
     const cones = conesMap.value[v] || [];
     if (cones.length > 0 && map) {
       const startId = courses.value.find((c) => c.id === v)?.start_cone_id;
@@ -2399,34 +1326,11 @@ watch(activeCourseId, async (v, prev) => {
   }
 });
 
-/* ── Data fetch ───────────────────────────────────── */
-async function fetchAll() {
-  try {
-    const res = await courseRequest("/api/courses");
-    courses.value = await res.json();
-    // Load every course's cones + memos concurrently. The old loop blocked each
-    // course on the previous one (1 + 2N serial round-trips); fan them out so
-    // first paint waits only on the slowest single course, not their sum.
-    await Promise.all(courses.value.map(async (c) => {
-      const [cones, memos, route] = await Promise.all([
-        courseRequest(`/api/courses/${c.id}/cones`).then((r) => r.json()).catch(() => []),
-        courseRequest(`/api/courses/${c.id}/memos`).then((r) => r.json()).catch(() => []),
-        courseRequest(`/api/courses/${c.id}/route`).then((r) => r.json()).catch(() => ({ markers: [], steps: [] })),
-      ]);
-      conesMap.value[c.id] = cones;
-      memosMap.value[c.id] = memos;
-      routeMap.value[c.id] = route;
-    }));
-    if (!activeCourseId.value && courses.value.length) {
-      // Restore the last-used course so a refresh doesn't silently drop
-      // the operator back to courses[0] (which then requires re-clicking
-      // the actually-wanted course every time the page reloads).
-      const saved = Number(loadPref("activeCourseId", null));
-      const match = Number.isInteger(saved) && courses.value.find((c) => c.id === saved);
-      activeCourseId.value = match ? saved : courses.value[0].id;
-    }
-  } catch {} finally { loading.value = false; }
-}
+// Whole-course cone replacements (an echo, or a resync after a dropped link)
+// redraw that course's markers; the replay view owns the map meanwhile.
+course.onConesReplaced((courseId) => {
+  if (map && !suppressRebuild && !isMissionsView.value) rebuildAllMarkers(courseId ?? null);
+});
 
 /* ── Map init ─────────────────────────────────────── */
 async function initMap() {
@@ -2489,10 +1393,6 @@ function onMapClick(e) {
   if (rotateMode.value) return;
   // In select mode, taps only toggle cones / draw boxes — never add or clear on empty space.
   if (selectMode.value) return;
-  if (roverMode.value === "path-pick") {
-    computePath(e.latlng.lat, e.latlng.lng);
-    return;
-  }
   if (roverMode.value === "path-ready") {
     clearPath();
     return;
@@ -2505,7 +1405,7 @@ function onMapClick(e) {
   if (roverMode.value === "executing") return;
   if (routeEditMode.value) {
     if (activeTab.value === "courses" && activeCourseId.value && !editLocked.value) {
-      addRouteMarker(e.latlng.lat, e.latlng.lng);
+      course.addRouteMarker(e.latlng.lat, e.latlng.lng);
     }
     return;
   }
@@ -2630,7 +1530,7 @@ function setupSelectionBox() {
 /* ── Course CRUD ──────────────────────────────────── */
 function toggleVisibility(courseId) {
   if (courseId === activeCourseId.value) return;
-  visibility.value[courseId] = !visibility.value[courseId];
+  course.toggleVisibility(courseId);
   if (map) {
     rebuildAllMarkers();
   }
@@ -2641,32 +1541,17 @@ function selectCourse(courseId) { activeCourseId.value = courseId; }
 async function createCourse() {
   const name = newCourseName.value.trim();
   if (!name) return;
-  try {
-    const res = await courseRequest("/api/courses", { method: "POST", body: JSON.stringify({ name }) });
-    const created = await res.json();
-    newCourseName.value = "";
-    activeCourseId.value = created.id;
-  } catch (err) { notifyError(err.message); }
+  if (await course.createCourse(name)) newCourseName.value = "";
 }
 
-async function togglePublication(course) {
-  if (!canManageCourse.value || publishingId.value != null) return;
-  publishingId.value = course.id;
-  try {
-    const response = await courseRequest(`/api/courses/${course.id}/publication`, {
-      method: "PATCH", body: JSON.stringify({ is_public: !course.is_public }),
-    });
-    const updated = await response.json();
-    const row = courses.value.find((c) => c.id === course.id);
-    if (row) row.is_public = updated.is_public;
-    notifySuccess(updated.is_public ? "Course published." : "Course unpublished.");
-  } catch (error) { notifyError(error.message); }
-  finally { publishingId.value = null; }
+function togglePublication(target) {
+  if (!canManageCourse.value) return;
+  course.togglePublication(target);
 }
 
-function startEditCourse(course) {
-  editingCourseId.value = course.id;
-  editCourseName.value = course.name;
+function startEditCourse(target) {
+  editingCourseId.value = target.id;
+  editCourseName.value = target.name;
   nextTick(() => {
     const el = document.querySelector(`.course-item.editing .course-name-input`);
     if (el) { el.focus(); el.select(); }
@@ -2676,27 +1561,19 @@ function startEditCourse(course) {
 async function saveCourseName(id) {
   const name = editCourseName.value.trim();
   if (!name) return;
-  try {
-    await courseRequest(`/api/courses/${id}`, { method: "PATCH", body: JSON.stringify({ name }) });
-    editingCourseId.value = null;
-  } catch (err) { notifyError(err.message); }
+  if (await course.renameCourse(id, name)) editingCourseId.value = null;
 }
 
 async function deleteCourse(id) {
-  const course = courses.value.find((c) => c.id === id);
+  const target = courses.value.find((c) => c.id === id);
   // The rover keeps a copy of the mission route, but the operator still needs
   // the course while that mission can run.
   if (activeMission.value?.course_id === id) {
     notifyError("A course used by an active mission cannot be deleted.");
     return;
   }
-  if (!confirm(`Delete course "${course?.name}"?`)) return;
-  try {
-    await courseRequest(`/api/courses/${id}`, { method: "DELETE" });
-    if (activeCourseId.value === id) {
-      activeCourseId.value = courses.value.find((c) => c.id !== id)?.id || null;
-    }
-  } catch (err) { notifyError(err.message); }
+  if (!confirm(`Delete course "${target?.name}"?`)) return;
+  await course.deleteCourse(id);
 }
 
 /* ── Calibration popup (antenna + wheel encoder) ───── */
@@ -2817,9 +1694,9 @@ function openCalibration() {
   // Sync once on open so a stale local state is corrected before the
   // operator's first click, then keep refreshing every 2 s while the
   // modal stays open.
-  fetchRoverStatus();
+  mission.fetchRoverStatus();
   if (calStatusPollHandle == null) {
-    calStatusPollHandle = setInterval(fetchRoverStatus, 2000);
+    calStatusPollHandle = setInterval(mission.fetchRoverStatus, 2000);
   }
 }
 
@@ -2950,61 +1827,6 @@ async function submitBatteryCal() {
 
 /* ── Rover log viewer ─────────────────────────────── */
 const showLogs = ref(false);
-const logEntries = ref([]);
-// Newest first for the operator: ROS log buffer arrives oldest-first,
-// but the inspector and full-screen viewer show the most recent first.
-const logsNewestFirst = computed(() => [...logEntries.value].reverse());
-const logsNewestFirstTrimmed = computed(() => [...logEntries.value].slice(-50).reverse());
-const logUploadedAt = ref(0);
-const logFetching = ref(false);
-
-async function openLogs() {
-  showLogs.value = true;
-  await refreshLogs();
-}
-
-async function refreshLogs() {
-  try {
-    const res = await roverRequest("/api/rover/logs");
-    const data = await res.json();
-    logEntries.value = data.entries || [];
-    logUploadedAt.value = data.uploaded_at || 0;
-  } catch (err) { notifyError(err.message); }
-}
-
-async function requestLogs() {
-  logFetching.value = true;
-  try {
-    await roverRequest("/api/rover/logs/fetch", { method: "POST" });
-    // Wait briefly for rover to upload, then refresh.
-    setTimeout(async () => {
-      await refreshLogs();
-      logFetching.value = false;
-    }, 1500);
-  } catch (err) {
-    logFetching.value = false;
-    notifyError(err.message);
-  }
-}
-
-function formatLogTime(ms) {
-  if (!ms) return "—";
-  // "YYYY. M. D. H:MM:SS AM/PM": ko-KR date, en-US 12-hour time.
-  const d = new Date(ms);
-  return `${d.toLocaleDateString("ko-KR")} ${d.toLocaleTimeString("en-US")}`;
-}
-
-function downloadLogs() {
-  const text = logEntries.value
-    .map((e) => `${formatLogTime(e.t)} [${e.level}] [${e.node}] ${e.msg}`)
-    .join("\n");
-  const blob = new Blob([text], { type: "text/plain" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `rover-log-${new Date().toISOString().slice(0, 19).replace(/:/g, "-")}.txt`;
-  a.click();
-  URL.revokeObjectURL(a.href);
-}
 
 /* ── Snapshots ────────────────────────────────────── */
 // Snapshot create/list/restore/delete + modal state live in a composable;
@@ -3012,52 +1834,23 @@ function downloadLogs() {
 const { showSnapshots, snapshotList, snapshotReason, openSnapshots, createSnapshot, restoreSnapshot, deleteSnapshot } =
   useCourseSnapshots({ request: courseRequest, activeCourseId, notifyError });
 
-// Shared time formatter (also used for the log-upload timestamp), so it stays here.
-function formatSnapshotTime(ms) {
-  if (!ms) return "—";
-  return new Date(ms).toLocaleString("ko-KR", { hour12: false });
-}
-
 /* ── Undo ─────────────────────────────────────────── */
-// Each edit records an inverse closure. Undo functions hit the API directly so
-// they don't re-enter the recording paths (no redo is tracked). Deleted cones
-// are restored by re-creating them, so they come back with fresh ids.
-const MAX_UNDO = 50;
-function pushUndo(label, undo) {
-  undoStack.value.push({ label, undo });
-  if (undoStack.value.length > MAX_UNDO) undoStack.value.shift();
-}
-async function performUndo() {
+function performUndo() {
   if (editLocked.value) return;
-  const entry = undoStack.value.pop();
-  if (!entry) return;
-  try { await entry.undo(); }
-  catch (err) { notifyError(`Undo failed: ${err.message}`); }
+  edits.undo();
 }
 
 /* ── Cone CRUD ────────────────────────────────────── */
-async function addCone(lat, lng, side, alt) {
-  if (!activeCourseId.value) return;
-  try {
-    // alt가 undefined면 JSON.stringify가 키를 빼므로 수동(지도 클릭) 콘은 고도 없이
-    // 저장되고, 로버에서 받은 콘만 RTK 고도(m)를 함께 보존한다.
-    const res = await courseRequest(`/api/courses/${activeCourseId.value}/cones`, {
-      method: "POST", body: JSON.stringify({ lat, lng, side, alt }),
-    });
-    const created = await res.json().catch(() => null);
-    if (created && created.id != null) {
-      const cid = created.id;
-      pushUndo("Add cone", () => courseRequest(`/api/cones/${cid}`, { method: "DELETE" }));
-    }
-  } catch (err) { notifyError(err.message); }
+// alt is undefined for a map tap, so only device-captured cones keep an RTK altitude.
+function addCone(lat, lng, side, alt) {
+  return course.addCone(lat, lng, side, alt);
 }
 
 async function updateCone() {
   if (!selectedConeId.value) return;
   const id = selectedConeId.value;
-  const before = (conesMap.value[activeCourseId.value] || []).find((c) => c.id === id);
-  // 위치를 실제로 편집한 경우에만 lat/lng를 보낸다. side만 바꿨는데 stale 폼 좌표를 함께
-  // 보내면, 선택 후 타 조작자가 SSE로 옮긴 콘 위치를 되돌린다(동시 편집 데이터 손실).
+  // Send lat/lng only when the operator edited them: stale form coordinates
+  // would revert a move another operator made after the selection.
   const positionEdited = editLat.value !== editLatOrig.value || editLng.value !== editLngOrig.value;
   const body = { side: editSide.value };
   if (positionEdited) {
@@ -3067,71 +1860,33 @@ async function updateCone() {
     body.lat = lat;
     body.lng = lng;
   }
-  try {
-    await courseRequest(`/api/cones/${id}`, {
-      method: "PATCH", body: JSON.stringify(body),
-    });
-    if (before) pushUndo("Edit cone", () => courseRequest(`/api/cones/${id}`, {
-      method: "PATCH", body: JSON.stringify({ lat: before.lat, lng: before.lng, side: before.side }),
-    }));
-    selectedConeId.value = null;
-  } catch (err) { notifyError(err.message); }
+  if (await course.updateCone(id, body)) selectedConeId.value = null;
 }
 
 async function deleteCone(id) {
-  const courseId = activeCourseId.value;
-  const before = (conesMap.value[courseId] || []).find((c) => c.id === id);
-  try {
-    await courseRequest(`/api/cones/${id}`, { method: "DELETE" });
-    if (selectedConeId.value === id) selectedConeId.value = null;
-    if (before) pushUndo("Delete cone", () => courseRequest(`/api/courses/${courseId}/cones`, {
-      method: "POST", body: JSON.stringify({ lat: before.lat, lng: before.lng, side: before.side, alt: before.alt }),
-    }));
-  } catch (err) { notifyError(err.message); }
+  if (await course.deleteCone(id) && selectedConeId.value === id) selectedConeId.value = null;
 }
 
-// Delete every cone in the multi-selection. SSE `cones` deletes rebuild the
-// marker layer, so we only have to fire the requests and clear local state.
+// `cones` echoes rebuild the marker layer, so only the local selection clears here.
 async function deleteSelected() {
   const ids = [...multiSelectedIds.value];
   if (ids.length === 0 || editLocked.value) return;
   if (!confirm(`Delete ${ids.length} selected cones?`)) return;
   if (rotateMode.value) exitRotateMode();
-  const courseId = activeCourseId.value;
-  const removed = (conesMap.value[courseId] || [])
-    .filter((c) => multiSelectedIds.value.has(c.id))
-    .map((c) => ({ lat: c.lat, lng: c.lng, side: c.side }));
-  try {
-    await Promise.all(ids.map((id) => courseRequest(`/api/cones/${id}`, { method: "DELETE" })));
-    if (removed.length) pushUndo(`Delete ${removed.length} cones`, () => Promise.all(
-      removed.map((r) => courseRequest(`/api/courses/${courseId}/cones`, { method: "POST", body: JSON.stringify(r) }))
-    ));
-  } catch (err) {
-    notifyError(`Failed to delete cones: ${err.message}`);
-  }
+  await course.deleteCones(ids);
   if (ids.includes(selectedConeId.value)) selectedConeId.value = null;
   multiSelectedIds.value = new Set();
   updateMultiSelectIcons();
 }
 
-// Wipe every cone in the active course in one request. Undo re-adds them (with
-// fresh ids); the SSE `cones` clear rebuilds the marker layer for everyone.
 async function deleteAllCones() {
-  const courseId = activeCourseId.value;
-  if (!courseId) return;
-  const all = (conesMap.value[courseId] || []).map((c) => ({ lat: c.lat, lng: c.lng, side: c.side, alt: c.alt }));
-  if (all.length === 0) return;
-  if (!confirm(`Delete all ${all.length} cones in this course? They disappear from the map unless you undo.`)) return;
+  const count = activeCones.value.length;
+  if (!activeCourseId.value || count === 0) return;
+  if (!confirm(`Delete all ${count} cones in this course? They disappear from the map unless you undo.`)) return;
   if (rotateMode.value) exitRotateMode();
-  try {
-    await courseRequest(`/api/courses/${courseId}/cones`, { method: "DELETE" });
+  if (await course.deleteAllCones()) {
     selectedConeId.value = null;
     multiSelectedIds.value = new Set();
-    pushUndo(`Delete all ${all.length} cones`, () => Promise.all(
-      all.map((c) => courseRequest(`/api/courses/${courseId}/cones`, { method: "POST", body: JSON.stringify(c) }))
-    ));
-  } catch (err) {
-    notifyError(`Failed to delete all cones: ${err.message}`);
   }
 }
 
@@ -3139,62 +1894,38 @@ async function deleteAllCones() {
 // 메모는 콘과 별개의 주석 레이어다 — 편집 잠금(콘 오조작 방지)과 무관하게 항상
 // 추가·이동·리사이즈·수정·삭제할 수 있다. 중심 좌표(lat/lng)와 실측 크기(width/
 // height, m)로 서버에 저장하고, 서버가 'memos' SSE로 되쏘면 모든 조작자가 공유한다.
-// 드래그/리사이즈/입력 중에는 memoBusy로 SSE 에코를 막아 조작이 끊기지 않게 한다.
-let memoBusy = false;
+// 드래그/리사이즈/입력 중에는 setMemoBusy로 SSE 에코를 막아 조작이 끊기지 않게 한다.
 let memoDrag = null;   // { id, startLat, startLng, origLat, origLng }
 let memoResize = null; // { id, startX, startY, origW, origH, mpp }
 let memoRotate = null; // { id, cx, cy, startAngle, orig, wasDragging }
 let memoEditOrig = null; // 입력 시작 시점의 내용(undo·변경감지용)
 
-function findMemo(id) {
-  return (memosMap.value[activeCourseId.value] || []).find((m) => m.id === id);
-}
+const findMemo = course.findMemo;
 
 // 지도 중앙에 기본 크기(대략 화면 170×120px 상당)의 빈 메모를 추가하고 바로 포커스.
 async function addMemo() {
-  const courseId = activeCourseId.value;
-  if (!courseId || !map) return;
+  if (!activeCourseId.value || !map) return;
   const center = map.getCenter();
   const mpp = metersPerPixel(center.lat);
-  try {
-    const res = await courseRequest(`/api/courses/${courseId}/memos`, {
-      method: "POST",
-      body: JSON.stringify({ lat: center.lat, lng: center.lng, width: 150 * mpp, height: 48 * mpp, content: "" }),
+  const created = await course.addMemo({ lat: center.lat, lng: center.lng, width: 150 * mpp, height: 48 * mpp });
+  if (created) {
+    nextTick(() => {
+      document.querySelector(`.memo-label[data-id="${created.id}"] .memo-text`)?.focus();
     });
-    const created = await res.json().catch(() => null);
-    if (created && created.id != null) {
-      // SSE 에코 전에 즉시 보이도록 낙관적 추가(에코가 같은 배열로 덮어써도 무해).
-      const list = memosMap.value[courseId] || (memosMap.value[courseId] = []);
-      if (!list.some((x) => x.id === created.id)) list.push(created);
-      pushUndo("Add memo", () => courseRequest(`/api/memos/${created.id}`, { method: "DELETE" }));
-      nextTick(() => {
-        document.querySelector(`.memo-label[data-id="${created.id}"] .memo-text`)?.focus();
-      });
-    }
-  } catch (err) { notifyError(err.message); }
+  }
 }
 
-async function deleteMemo(id) {
-  const before = findMemo(id);
-  try {
-    await courseRequest(`/api/memos/${id}`, { method: "DELETE" });
-    if (before) pushUndo("Delete memo", () => courseRequest(`/api/courses/${before.course_id}/memos`, {
-      method: "POST",
-      body: JSON.stringify({ lat: before.lat, lng: before.lng, width: before.width, height: before.height, content: before.content }),
-    }));
-  } catch (err) { notifyError(err.message); }
-}
+const deleteMemo = course.deleteMemo;
 
 // 내용 편집: 포커스 동안 SSE 에코를 막고, blur 때 바뀐 경우에만 저장.
-function onMemoFocus(m) { memoEditOrig = m.content; memoBusy = true; }
+function onMemoFocus(m) { memoEditOrig = m.content; course.setMemoBusy(true); }
 async function onMemoBlur(m) {
-  memoBusy = false;
+  course.setMemoBusy(false);
   const before = memoEditOrig;
   memoEditOrig = null;
   if (before === null || m.content === before) return;
   try {
-    await courseRequest(`/api/memos/${m.id}`, { method: "PATCH", body: JSON.stringify({ content: m.content }) });
-    pushUndo("Edit memo", () => courseRequest(`/api/memos/${m.id}`, { method: "PATCH", body: JSON.stringify({ content: before }) }));
+    await course.patchMemo(m.id, { content: m.content }, { content: before }, "Edit memo");
   } catch (err) { m.content = before; notifyError(err.message); }
 }
 
@@ -3207,7 +1938,7 @@ function memoContainerPoint(e) {
 function onMemoDragStart(m, e) {
   if (!map) return;
   e.preventDefault(); e.stopPropagation();
-  memoBusy = true;
+  course.setMemoBusy(true);
   const ll = map.containerPointToLatLng(memoContainerPoint(e));
   // 잡은 순간의 지도 드래그 활성 상태를 기억해 끝날 때 그대로 되돌린다 — 영역 선택
   // 모드는 지도 드래그를 꺼 두므로 무조건 enable()하면 그 모드가 깨진다.
@@ -3229,13 +1960,12 @@ async function onMemoDragEnd() {
   window.removeEventListener("pointermove", onMemoDragMove);
   window.removeEventListener("pointerup", onMemoDragEnd);
   if (map && memoDrag?.wasDragging) map.dragging.enable();
-  const d = memoDrag; memoDrag = null; memoBusy = false;
+  const d = memoDrag; memoDrag = null; course.setMemoBusy(false);
   if (!d) return;
   const m = findMemo(d.id);
   if (!m || (m.lat === d.origLat && m.lng === d.origLng)) return;
   try {
-    await courseRequest(`/api/memos/${d.id}`, { method: "PATCH", body: JSON.stringify({ lat: m.lat, lng: m.lng }) });
-    pushUndo("Move memo", () => courseRequest(`/api/memos/${d.id}`, { method: "PATCH", body: JSON.stringify({ lat: d.origLat, lng: d.origLng }) }));
+    await course.patchMemo(d.id, { lat: m.lat, lng: m.lng }, { lat: d.origLat, lng: d.origLng }, "Move memo");
   } catch (err) { notifyError(err.message); }
 }
 
@@ -3244,7 +1974,7 @@ async function onMemoDragEnd() {
 function onMemoResizeStart(m, e) {
   if (!map) return;
   e.preventDefault(); e.stopPropagation();
-  memoBusy = true;
+  course.setMemoBusy(true);
   memoResize = { id: m.id, startX: e.clientX, startY: e.clientY, origW: m.width, origH: m.height, mpp: metersPerPixel(m.lat), wasDragging: map.dragging.enabled() };
   map.dragging.disable();
   window.addEventListener("pointermove", onMemoResizeMove);
@@ -3263,13 +1993,12 @@ async function onMemoResizeEnd() {
   window.removeEventListener("pointermove", onMemoResizeMove);
   window.removeEventListener("pointerup", onMemoResizeEnd);
   if (map && memoResize?.wasDragging) map.dragging.enable();
-  const r = memoResize; memoResize = null; memoBusy = false;
+  const r = memoResize; memoResize = null; course.setMemoBusy(false);
   if (!r) return;
   const m = findMemo(r.id);
   if (!m || (m.width === r.origW && m.height === r.origH)) return;
   try {
-    await courseRequest(`/api/memos/${r.id}`, { method: "PATCH", body: JSON.stringify({ width: m.width, height: m.height }) });
-    pushUndo("Resize memo", () => courseRequest(`/api/memos/${r.id}`, { method: "PATCH", body: JSON.stringify({ width: r.origW, height: r.origH }) }));
+    await course.patchMemo(r.id, { width: m.width, height: m.height }, { width: r.origW, height: r.origH }, "Resize memo");
   } catch (err) { notifyError(err.message); }
 }
 
@@ -3278,7 +2007,7 @@ async function onMemoResizeEnd() {
 function onMemoRotateStart(m, e) {
   if (!map) return;
   e.preventDefault(); e.stopPropagation();
-  memoBusy = true;
+  course.setMemoBusy(true);
   const chip = e.currentTarget.closest(".memo-label");
   const box = chip.getBoundingClientRect();
   const cx = box.left + box.width / 2;
@@ -3307,7 +2036,7 @@ async function onMemoRotateEnd() {
   window.removeEventListener("pointermove", onMemoRotateMove);
   window.removeEventListener("pointerup", onMemoRotateEnd);
   if (map && memoRotate?.wasDragging) map.dragging.enable();
-  const rr = memoRotate; memoRotate = null; memoBusy = false;
+  const rr = memoRotate; memoRotate = null; course.setMemoBusy(false);
   if (!rr) return;
   const m = findMemo(rr.id);
   if (!m) return;
@@ -3318,8 +2047,7 @@ async function onMemoRotateEnd() {
     mapFrame.value++;
     if (rr.orig === 0) return; // 이미 0이면 저장 불필요
     try {
-      await courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: 0 }) });
-      pushUndo("Reset memo rotation", () => courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: rr.orig }) }));
+      await course.patchMemo(rr.id, { rotation: 0 }, { rotation: rr.orig }, "Reset memo rotation");
     } catch (err) { notifyError(err.message); }
     return;
   }
@@ -3329,8 +2057,7 @@ async function onMemoRotateEnd() {
   m.rotation = norm;
   if (norm === rr.orig) return;
   try {
-    await courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: norm }) });
-    pushUndo("Rotate memo", () => courseRequest(`/api/memos/${rr.id}`, { method: "PATCH", body: JSON.stringify({ rotation: rr.orig }) }));
+    await course.patchMemo(rr.id, { rotation: norm }, { rotation: rr.orig }, "Rotate memo");
   } catch (err) { notifyError(err.message); }
 }
 
@@ -3459,12 +2186,7 @@ async function onRotateDragEnd() {
 
   const undoPositions = startPositions ? [...startPositions].map(([id, p]) => ({ id, lat: p.lat, lng: p.lng })) : [];
   try {
-    await Promise.all(updates.map((u) =>
-      courseRequest(`/api/cones/${u.id}`, { method: "PATCH", body: JSON.stringify({ lat: u.lat, lng: u.lng }) })
-    ));
-    if (undoPositions.length) pushUndo("Rotate cones", () => Promise.all(
-      undoPositions.map((p) => courseRequest(`/api/cones/${p.id}`, { method: "PATCH", body: JSON.stringify({ lat: p.lat, lng: p.lng }) }))
-    ));
+    await course.moveCones(updates, undoPositions, "Rotate cones");
   } catch (err) {
     notifyError(`Failed to save cone rotation: ${err.message}`);
     for (const [id, p] of (startPositions || [])) {
@@ -3499,12 +2221,7 @@ async function rotateByDegrees(deg) {
   suppressRebuild = true;
   for (const u of updates) { const m = markers[`${activeCourseId.value}-${u.id}`]; if (m) m.setLatLng([u.lat, u.lng]); }
   try {
-    await Promise.all(updates.map((u) =>
-      courseRequest(`/api/cones/${u.id}`, { method: "PATCH", body: JSON.stringify({ lat: u.lat, lng: u.lng }) })
-    ));
-    pushUndo("Rotate cones", () => Promise.all(
-      startPositions.map((p) => courseRequest(`/api/cones/${p.id}`, { method: "PATCH", body: JSON.stringify({ lat: p.lat, lng: p.lng }) }))
-    ));
+    await course.moveCones(updates, startPositions, "Rotate cones");
   } catch (err) {
     notifyError(`Failed to save cone rotation: ${err.message}`);
     for (const p of startPositions) { const m = markers[`${activeCourseId.value}-${p.id}`]; if (m) m.setLatLng([p.lat, p.lng]); }
@@ -3574,15 +2291,11 @@ function panToVisibleCenter(lat, lng, opts = {}) {
 const followRover = ref(loadPref("followRover", false, (v) => v === "true"));
 watch(followRover, (v) => savePref("followRover", v));
 
-// A rover with no GPS fix reports (0, 0); trusting it would drop the marker on
-// — and pan the map to — Null Island, where the satellite basemap has no tiles
-// and the whole view renders blank grey. Reject the null-island sentinel and
-// any non-finite coordinate before touching the marker or the map. (The rover
-// also gates its position POSTs on a 2D fix, so this is defense-in-depth for
-// the live SSE stream.)
-function isValidRoverPos(lat, lng) {
-  return Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
-}
+// The rover marker and follow track the rover's latest position.
+watch(rover.livePosition, (p) => {
+  setDeviceMarker("rover", p?.lat, p?.lng);
+  if (followRover.value && p) scheduleFollow(p.lat, p.lng);
+});
 
 function centerOnRover() {
   // Follow always tracks the ROVER (the receiver is a handheld, not a chase
@@ -3602,12 +2315,6 @@ function toggleFollowRover() {
 // exclusive with rover-follow so the map never chases two targets at once.
 const followReceiver = ref(loadPref("followReceiver", false, (v) => v === "true"));
 watch(followReceiver, (v) => savePref("followReceiver", v));
-
-const receiverCanTrack = computed(() => {
-  const r = receiver.value;
-  const lp = r?.last_position;
-  return !!(r?.mode === "capture" && lp && isValidRoverPos(lp.lat, lp.lng));
-});
 
 function centerOnReceiver() {
   const lp = receiver.value?.last_position;
@@ -3774,10 +2481,7 @@ async function addConeFromRover() {
   if (!source) return;
   roverLoading.value = true;
   try {
-    const res = source === "receiver"
-      ? await gpsRequest("/api/gps/capture", { method: "POST" })
-      : await roverRequest("/api/rover/request", { method: "POST" });
-    const { lat, lng, alt } = await res.json();
+    const { lat, lng, alt } = await gps.capturePosition(source);
     setDeviceMarker(source, lat, lng);
     await addCone(lat, lng, currentSide.value, alt);
   } catch (err) {
@@ -3785,407 +2489,15 @@ async function addConeFromRover() {
   } finally { roverLoading.value = false; }
 }
 
-/* ── Path planning (TSP + 2-opt) ──────────────────── */
-
-function turnAngle(a, b, c) {
-  const ax = b.lng - a.lng, ay = b.lat - a.lat;
-  const bx = c.lng - b.lng, by = c.lat - b.lat;
-  const dot = ax * bx + ay * by;
-  const cross = ax * by - ay * bx;
-  return Math.abs(Math.atan2(cross, dot));
-}
-
-// 경로 비용: 거리 + 회전 페널티 (회전반경 ~1m, 급회전 시 감속 고려)
-const TURN_PENALTY = 2.0; // 라디안당 미터 환산 페널티
-
-function routeCost(pts) {
-  let cost = 0;
-  for (let i = 0; i < pts.length - 1; i++) {
-    cost += haversine(pts[i], pts[i + 1]);
-    if (i > 0) cost += turnAngle(pts[i - 1], pts[i], pts[i + 1]) * TURN_PENALTY;
-  }
-  return cost;
-}
-
-// 닫힌 루프 seq(= [start, ...route, start], 양 끝 start 고정)에서 seq[i..j]를
-// 뒤집을 때 값이 바뀌는 비용 항(끊기는 두 변 + 이음매 4개 꼭짓점의 회전 페널티)
-// 만 합산한다. 뒤집힌 구간 내부의 변 길이와 회전각은 보존되므로 이 항들만
-// before/after로 비교하면 한 번의 reverse를 O(1)로 정확히 평가할 수 있다.
-function loopLocalCost(seq, i, j) {
-  const last = seq.length - 1;
-  let s = 0;
-  // 바뀌는 변: (i-1,i), (j,j+1)
-  for (const e of [i - 1, j]) {
-    if (e >= 0 && e < last) s += haversine(seq[e], seq[e + 1]);
-  }
-  // 바뀌는 회전 꼭짓점: i-1, i, j, j+1 (start 꼭짓점 0·last 제외)
-  for (const v of [i - 1, i, j, j + 1]) {
-    if (v >= 1 && v <= last - 1) s += turnAngle(seq[v - 1], seq[v], seq[v + 1]) * TURN_PENALTY;
-  }
-  return s;
-}
-
-// start에서 출발해 모든 콘을 한 번씩 찍고 start로 돌아오는 닫힌 루프에 대한
-// 2-opt. 변경마다 전체 비용을 다시 계산하던 기존 구현은 O(passes·n^3)이라 콘이
-// 수백 개면 브라우저가 멈췄다 → loopLocalCost로 한 수를 O(1)에 평가하여
-// O(passes·n^2)로 낮췄다. first-improvement + 패스/시간 상한으로 항상 종료.
-function twoOptLoop(route, start, budgetMs = 2000, maxPasses = 40) {
-  const n = route.length;
-  if (n < 3) return route.map((p) => ({ lat: p.lat, lng: p.lng }));
-  const seq = [start, ...route.map((p) => ({ lat: p.lat, lng: p.lng })), start];
-  const reverse = (lo, hi) => {
-    while (lo < hi) { const t = seq[lo]; seq[lo] = seq[hi]; seq[hi] = t; lo++; hi--; }
-  };
-  const t0 = performance.now();
-  let improved = true, passes = 0;
-  while (improved && passes < maxPasses && performance.now() - t0 < budgetMs) {
-    improved = false; passes++;
-    for (let i = 1; i <= n; i++) {
-      for (let j = i + 1; j <= n; j++) {
-        const before = loopLocalCost(seq, i, j);
-        reverse(i, j);
-        if (loopLocalCost(seq, i, j) < before - 1e-9) improved = true;
-        else reverse(i, j); // 개선 없으면 원복
-      }
-      if (performance.now() - t0 >= budgetMs) break;
-    }
-  }
-  return seq.slice(1, n + 1);
-}
-
-// 한 경계선(같은 side의 콘들)을 거리 기준 최근접 이웃으로 잇는 열린 체인.
-// 극단점(무게중심에서 가장 먼 콘)에서 출발 — 경계가 1차원 곡선이라 NN이 곧
-// 경계 순서를 복원한다.
-function nnChain(pts) {
-  const n = pts.length;
-  if (n <= 2) return pts.map((p) => ({ lat: p.lat, lng: p.lng }));
-  const clat = pts.reduce((s, p) => s + p.lat, 0) / n;
-  const clng = pts.reduce((s, p) => s + p.lng, 0) / n;
-  const cen = { lat: clat, lng: clng };
-  let s = 0, sd = -1;
-  for (let k = 0; k < n; k++) { const d = haversine(pts[k], cen); if (d > sd) { sd = d; s = k; } }
-  const used = new Array(n).fill(false);
-  const order = [s]; used[s] = true; let cur = s;
-  for (let step = 0; step < n - 1; step++) {
-    let best = -1, bd = Infinity;
-    for (let k = 0; k < n; k++) {
-      if (used[k]) continue;
-      const d = haversine(pts[cur], pts[k]);
-      if (d < bd) { bd = d; best = k; }
-    }
-    used[best] = true; order.push(best); cur = best;
-  }
-  return order.map((i) => ({ lat: pts[i].lat, lng: pts[i].lng }));
-}
-
-// 열린 경로 2-opt(거리만, 회전 페널티 없음): 경계 체인의 꼬임을 편다. 한 수를
-// 양 끝 두 변의 길이로 O(1) 평가.
-function twoOptOpen(route, budgetMs = 800, maxPasses = 40) {
-  const pts = route.map((p) => ({ lat: p.lat, lng: p.lng }));
-  const n = pts.length;
-  if (n < 4) return pts;
-  const t0 = performance.now();
-  let improved = true, passes = 0;
-  while (improved && passes < maxPasses && performance.now() - t0 < budgetMs) {
-    improved = false; passes++;
-    for (let i = 0; i < n - 1; i++) {
-      for (let j = i + 2; j < n; j++) {
-        const a = pts[i], b = pts[i + 1], c = pts[j], dn = j + 1 < n ? pts[j + 1] : null;
-        const oldD = haversine(a, b) + (dn ? haversine(c, dn) : 0);
-        const newD = haversine(a, c) + (dn ? haversine(b, dn) : 0);
-        if (newD < oldD - 1e-9) {
-          let lo = i + 1, hi = j;
-          while (lo < hi) { const t = pts[lo]; pts[lo] = pts[hi]; pts[hi] = t; lo++; hi--; }
-          improved = true;
-        }
-      }
-    }
-  }
-  return pts;
-}
-
-// 재구성한 경계 체인들을 start에서부터 그리디로 연결. 각 체인은 양방향 모두
-// 시도해 가까운 끝에서 진입 → 연결 구간(경계 사이 이동)을 최소화.
-function stitchChains(start, chains) {
-  const remaining = chains.filter((c) => c.length > 0);
-  const route = [];
-  let cur = start;
-  while (remaining.length) {
-    let bestIdx = -1, bestDist = Infinity, bestRev = false;
-    for (let idx = 0; idx < remaining.length; idx++) {
-      const ch = remaining[idx];
-      const d0 = haversine(cur, ch[0]);
-      const d1 = haversine(cur, ch[ch.length - 1]);
-      if (d0 < bestDist) { bestDist = d0; bestIdx = idx; bestRev = false; }
-      if (d1 < bestDist) { bestDist = d1; bestIdx = idx; bestRev = true; }
-    }
-    const seg = remaining.splice(bestIdx, 1)[0];
-    const ordered = bestRev ? [...seg].reverse() : seg;
-    for (const p of ordered) route.push({ lat: p.lat, lng: p.lng });
-    cur = route[route.length - 1];
-  }
-  return route;
-}
-
-function startPathPick() {
-  openMissionBuilder();
-}
-
-async function loadMissionPresets() {
-  const courseId = activeCourseId.value;
-  const requestId = ++missionPresetRequestSeq;
-  missionPresets.value = [];
-  if (!courseId) return;
-  try {
-    const response = await courseRequest(`/api/courses/${courseId}/mission-presets`);
-    const presets = (await response.json()).presets || [];
-    if (presetResponseIsCurrent({
-      requestId,
-      latestRequestId: missionPresetRequestSeq,
-      requestedCourseId: courseId,
-      activeCourseId: activeCourseId.value,
-    })) missionPresets.value = presets;
-  } catch (error) {
-    if (presetResponseIsCurrent({
-      requestId,
-      latestRequestId: missionPresetRequestSeq,
-      requestedCourseId: courseId,
-      activeCourseId: activeCourseId.value,
-    })) notifyError(`Failed to load presets: ${error.message}`);
-  }
-}
-
-function coneRouteItem(cone) {
-  return {
-    cone_id: cone.id, lat: cone.lat, lng: cone.lng, alt: cone.alt, side: cone.side,
-  };
-}
-
-function openMissionBuilder() {
-  if (!activeCourseId.value) return;
-  const mission = activeMission.value;
-  missionBuilderEditing.value = !!mission && missionHeld.value;
-  missionBuilderBusy.value = false;
-  missionBuilderBase.value = missionBuilderEditing.value ? missionDraftToken(mission) : null;
-  if (missionBuilderEditing.value) {
-    missionBuilderItems.value = mission.waypoints
-      .filter((waypoint) => waypoint.state === "pending" || waypoint.state === "active")
-      .map((waypoint) => ({ ...waypoint, waypoint_id: waypoint.id }));
-    missionFinishBehavior.value = mission.finish_behavior;
-  } else if (pathWaypoints.value.length > 0) {
-    missionBuilderItems.value = pathWaypoints.value.map((waypoint) => ({ ...waypoint }));
-  } else {
-    const start = roverStatus.value.last_position || activeCones.value[0] || null;
-    missionBuilderItems.value = optimizeConeRoute(activeCones.value, start).map(coneRouteItem);
-    missionFinishBehavior.value = "stop";
-  }
-  showMissionBuilder.value = true;
-  loadMissionPresets();
-}
-
-function installMissionBuilderPayload({ items, finishBehavior, presetReference = null }) {
-  invalidateLocalMissionRouteAuthority();
-  const editing = missionBuilderEditing.value;
-  const completed = editing && activeMission.value
-    ? activeMission.value.waypoints.filter((waypoint) => waypoint.state === "completed")
-    : [];
-  pathWaypoints.value = [
-    ...completed,
-    ...items.map((item) => ({ ...item, state: item.state === "active" ? "active" : "pending" })),
-  ];
-  missionFinishBehavior.value = finishBehavior;
-  pathPresetReference.value = presetReference
-    ? { ...presetReference, courseId: activeCourseId.value }
-    : null;
-  const start = activeMission.value?.start_position || roverStatus.value.last_position || pathWaypoints.value[0];
-  pathStart = start ? { lat: start.lat, lng: start.lng } : null;
-  pathReturnOrigin = pathWaypoints.value.length === 0 && finishBehavior === "return_to_start"
-    ? (roverStatus.value.last_position ? { ...roverStatus.value.last_position } : null)
-    : null;
-  executedIndex.value = completed.length;
-  executionStartIdx = completed.length;
-  pathMissionBase = editing ? missionBuilderBase.value : null;
-  roverMode.value = editing ? "stopped" : "path-ready";
-  renderPath();
-}
-
-async function submitMissionBuilder(payload, { run = false } = {}) {
-  if (missionBuilderBusy.value) return;
-  const submission = missionBuilderSubmission({ editing: missionBuilderEditing.value, run });
-  if (!submission.persist) {
-    installMissionBuilderPayload(payload);
-    showMissionBuilder.value = false;
-    missionBuilderBase.value = null;
-    if (submission.next === "execute") openPreflight("execute");
-    return;
-  }
-
-  const mission = activeMission.value;
-  const draft = missionBuilderBase.value;
-  missionBuilderBusy.value = true;
-  // Close before the request so an incoming authoritative mission response
-  // cannot leave an editable stale copy mounted behind the result.
-  showMissionBuilder.value = false;
-  try {
-    const edited = await syncMissionRemaining(mission, {
-      draft,
-      items: payload.items,
-      finishBehavior: payload.finishBehavior,
-    });
-    missionBuilderBase.value = missionDraftToken(edited);
-    notifySuccess("Saved the remaining mission route.");
-    if (submission.next === "resume") {
-      openPreflight(edited.status === "ready" ? "start-existing" : "resume", {
-        routeAlreadySynced: submission.routeAlreadySynced,
-        emptyRouteMode: payload.emptyRouteMode,
-      });
-    }
-  } catch (error) {
-    missionBuilderBase.value = null;
-    notifyError(`Failed to save the remaining route: ${error.message}`);
-    if (error.data?.reason === "cone_snapshot_mismatch") {
-      await fetchAll();
-      if (map && !isMissionsView.value) rebuildAllMarkers();
-      notifyWarn("Reloaded the changed cone positions. Review the latest route and apply it again.");
-    }
-    // A 409 response intentionally contains no route body. Fetch the current
-    // authority before allowing any further start/resume action.
-    await fetchRoverStatus();
-  } finally {
-    missionBuilderBusy.value = false;
-  }
-}
-
-async function applyMissionBuilder(payload) {
-  await submitMissionBuilder(payload);
-}
-
-async function runMissionBuilder(payload) {
-  await submitMissionBuilder(payload, { run: true });
-}
-
-async function saveMissionPreset({ name, items, finishBehavior }) {
-  if (missionPresetBusy.value) return;
-  missionPresetBusy.value = true;
-  try {
-    const existing = missionPresets.value.find((preset) => preset.name.toLowerCase() === name.toLowerCase());
-    const presetsPath = `/api/courses/${activeCourseId.value}/mission-presets`;
-    await courseRequest(existing ? `${presetsPath}/${existing.id}` : presetsPath, {
-      method: existing ? "PUT" : "POST",
-      body: JSON.stringify(buildMissionPresetPayload({
-        courseId: activeCourseId.value,
-        name,
-        finishBehavior,
-        items,
-        existing,
-      })),
-    });
-    notifySuccess(`${existing ? "Updated" : "Saved"} mission preset '${name}'.`);
-    await loadMissionPresets();
-  } catch (error) {
-    notifyError(`Failed to save preset: ${error.message}`);
-    await loadMissionPresets();
-  } finally {
-    missionPresetBusy.value = false;
-  }
-}
-
-async function deleteMissionPreset(id) {
-  if (missionPresetBusy.value) return;
-  if (!window.confirm("Delete this mission preset?")) return;
-  const preset = missionPresets.value.find((item) => item.id === id);
-  if (!preset) {
-    notifyWarn("The preset list changed. Reloading the latest list.");
-    await loadMissionPresets();
-    return;
-  }
-  missionPresetBusy.value = true;
-  try {
-    await courseRequest(`/api/courses/${preset.course_id}/mission-presets/${id}`, {
-      method: "DELETE",
-      body: JSON.stringify(buildMissionPresetDeletePayload(preset)),
-    });
-    await loadMissionPresets();
-  } catch (error) {
-    notifyError(`Failed to delete preset: ${error.message}`);
-    await loadMissionPresets();
-  } finally {
-    missionPresetBusy.value = false;
-  }
-}
-
-function computePathFromRover() {
-  const lp = roverStatus.value.last_position;
-  if (!lp || lp.lat == null || lp.lng == null) {
-    notifyWarn("The rover position is unknown.");
-    return;
-  }
-  computePath(lp.lat, lp.lng);
-}
-
-function computePath(startLat, startLng) {
-  const allCones = activeCones.value;
-  if (allCones.length === 0) { roverMode.value = "none"; return; }
-
-  const start = { lat: startLat, lng: startLng };
-
-  // 콘 등록(id) 순서는 신뢰할 수 없다(좌/우 블록이 섞이고 큰 점프 존재). 따라서
-  // 순서에 의존하지 않고 기하학으로 경로를 만든다.
-  //   1) side별로 묶어 각 경계선을 NN 체인 + 열린 2-opt로 순서 복원
-  //   2) start에서부터 체인들을 그리디로 이어 붙여 시드 경로 구성
-  //   3) 닫힌 루프 2-opt(거리 + 회전 페널티)로 연결 구간을 다듬어 거리 단축
-  const chains = ["left", "right", "center"]
-    .map((side) => allCones.filter((c) => c.side === side))
-    .filter((g) => g.length > 0)
-    .map((g) => twoOptOpen(nnChain(g)));
-
-  const seed = stitchChains(start, chains);
-  const optimized = twoOptLoop(seed, start);
-
-  pathStart = { lat: startLat, lng: startLng };
-  pathReturnOrigin = null;
-  pathPresetReference.value = null;
-  invalidateLocalMissionRouteAuthority();
-  pathWaypoints.value = optimized;
-  renderPath();
-
-  roverMode.value = "path-ready";
-}
-
+/* ── Mission path ─────────────────────────────────── */
 function renderPath() {
   if (!map) return;
 
   if (pathLine) { map.removeLayer(pathLine); pathLine = null; }
   if (pathStartMarker) { map.removeLayer(pathStartMarker); pathStartMarker = null; }
   if (pathEndMarker) { map.removeLayer(pathEndMarker); pathEndMarker = null; }
-  pathCumDist = [];
-  pathTotalDist = 0;
-  pathDistance.value = 0;
-  const geometry = missionPathGeometry({
-    pathStart,
-    waypoints: pathWaypoints.value,
-    finishBehavior: missionFinishBehavior.value,
-    returnOrigin: pathReturnOrigin,
-  });
+  const geometry = pathGeometry.value;
   if (!geometry) return;
-
-  if (geometry.returnOnly) {
-    pathTotalDist = haversine(geometry.points[0], geometry.points[1]);
-    pathDistance.value = pathTotalDist;
-  } else {
-    // Cumulative distance from the original mission start. A return leg is only
-    // drawn and counted when the mission explicitly requests it.
-    pathCumDist = new Array(pathWaypoints.value.length);
-    let acc = haversine(pathStart, pathWaypoints.value[0]);
-    pathCumDist[0] = acc;
-    for (let i = 1; i < pathWaypoints.value.length; i++) {
-      acc += haversine(pathWaypoints.value[i - 1], pathWaypoints.value[i]);
-      pathCumDist[i] = acc;
-    }
-    pathTotalDist = acc + (missionFinishBehavior.value === "return_to_start"
-      ? haversine(pathWaypoints.value[pathWaypoints.value.length - 1], pathStart) : 0);
-    pathDistance.value = pathTotalDist;
-  }
 
   const fullPath = geometry.points;
   const stops = [[34,197,94],[234,179,8],[249,115,22],[239,68,68]]; // green→yellow→orange→red
@@ -4209,6 +2521,8 @@ function renderPath() {
   const end = fullPath[fullPath.length - 1];
   pathEndMarker = pathLabel("E", [end.lat, end.lng], "#ef4444").addTo(map);
 }
+// The live layers are torn down in the missions-history view.
+watch(pathGeometry, () => { if (!isMissionsView.value) renderPath(); });
 
 function pathLabel(text, latlng, color) {
   return L.marker(latlng, {
@@ -4219,633 +2533,6 @@ function pathLabel(text, latlng, color) {
     }),
     interactive: false, zIndexOffset: 900,
   });
-}
-
-function moveWaypoint(idx, delta) {
-  const target = idx + delta;
-  if (target < 0 || target >= pathWaypoints.value.length) return;
-  const next = [...pathWaypoints.value];
-  [next[idx], next[target]] = [next[target], next[idx]];
-  invalidateLocalMissionRouteAuthority();
-  pathPresetReference.value = null;
-  pathWaypoints.value = next;
-  renderPath();
-}
-
-function clearPath({ endMissionOnServer = true } = {}) {
-  // Local overlays are never allowed to destroy server mission state. Ending a
-  // mission is only performed by the explicit, confirmed abandon action.
-  void endMissionOnServer;
-  invalidateLocalMissionRouteAuthority();
-  if (pathLine) { map.removeLayer(pathLine); pathLine = null; }
-  if (pathStartMarker) { map.removeLayer(pathStartMarker); pathStartMarker = null; }
-  if (pathEndMarker) { map.removeLayer(pathEndMarker); pathEndMarker = null; }
-  pathStart = null;
-  pathReturnOrigin = null;
-  pathPresetReference.value = null;
-  pathWaypoints.value = [];
-  pathCumDist = [];
-  pathTotalDist = 0;
-  pathMissionBase = null;
-  displayedMissionId = null;
-  displayedMissionAuthorityKey = null;
-  executionStartIdx = 0;
-  executedIndex.value = 0;
-  pathProgress.value = 0;
-  pathDistance.value = 0;
-  missionFinishBehavior.value = "stop";
-  showMissionBuilder.value = false;
-  missionBuilderBase.value = null;
-  clearSprayMarkers();
-  if (roverMode.value !== "manual") roverMode.value = "none";
-}
-
-// "End mission" 버튼 핸들러. 보존된(비상정지·중단) 미션을 폐기하는 파괴적 작업이라
-// 반드시 확인을 받는다.
-async function abandonMission() {
-  if (missionEndBusy.value || missionEndAwaitingAckId.value === activeMissionAuthority.value?.id) return;
-  if (!window.confirm("This ends and discards the current mission.\nIt can no longer be resumed. Continue?")) return;
-  const missionId = activeMissionAuthority.value?.id;
-  if (!missionId) return;
-  missionEndBusy.value = true;
-  cancelMissionEndReconcile();
-  missionEndAwaitingAckId.value = missionId;
-  missionEndAwaitingCommandId.value = null;
-  let authorityToken = null;
-  try {
-    authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-    const response = await roverRequest(`/api/missions/${missionId}/end`, { method: "POST" });
-    const data = await response.json();
-    if (applyMissionCommandResponse(data, "end", authorityToken)) {
-      notifyWarn("Mission end requested. The route and controls stay as they are until the rover confirms the stop.");
-    }
-  } catch (err) {
-    await reconcileMissionEndRequestFailure(missionId);
-    notifyWarn(`Failed to end mission: ${err.message}`);
-  } finally {
-    missionEndBusy.value = false;
-  }
-}
-
-function onPathBtn() {
-  if (roverMode.value === "executing") return; // 실행 중에는 무시
-  if (roverMode.value === "stopped") {
-    openPreflight(activeMission.value?.status === "ready" ? "start-existing" : "resume");
-    return;
-  }
-  if (roverMode.value === "path-ready") { openPreflight("execute"); return; }
-  if (roverMode.value === "path-pick") { clearPath(); return; }
-  if (roverMode.value === "none") { startPathPick(); }
-}
-
-function openPreflight(mode, { routeAlreadySynced = false, emptyRouteMode = null } = {}) {
-  preflightMode.value = mode;
-  preflightRouteAlreadySynced.value = routeAlreadySynced;
-  preflightMissionToken.value = mode === "execute" ? null : missionCommandToken(activeMission.value);
-  preflightMissionDraft.value = mode === "execute" ? null : missionDraftToken(activeMission.value);
-  preflightAuthorityToken.value = mode === "execute" ? null : currentMissionAuthorityFence();
-  preflightEmptyRouteMode.value = emptyRouteMode || missionEmptyResumeMode(activeMission.value);
-  preflightForce.value = false;
-  showPreflight.value = true;
-}
-
-function cancelPreflight() {
-  showPreflight.value = false;
-  preflightMissionToken.value = null;
-  preflightMissionDraft.value = null;
-  preflightAuthorityToken.value = null;
-  preflightEmptyRouteMode.value = null;
-}
-
-async function confirmPreflight() {
-  if (!preflightCanConfirm.value) {
-    notifyError(preflightHasBlockingFailure.value
-      ? "A mission cannot start or resume until the E-stop is released."
-      : "Resolve the failed checks or explicitly accept the remaining warnings.");
-    return;
-  }
-  if (preflightMode.value !== "execute"
-      && !missionAuthorityFenceIsCurrent(preflightAuthorityToken.value)) {
-    cancelPreflight();
-    notifyError("The mission changed during the preflight check. Check again with the latest state.");
-    return;
-  }
-  const force = preflightForce.value && !preflightAllOk.value;
-  showPreflight.value = false;
-  const commandToken = preflightMissionToken.value;
-  const commandDraft = preflightMissionDraft.value;
-  const authorityFence = preflightAuthorityToken.value;
-  const emptyRouteMode = preflightEmptyRouteMode.value;
-  preflightMissionToken.value = null;
-  preflightMissionDraft.value = null;
-  preflightAuthorityToken.value = null;
-  preflightEmptyRouteMode.value = null;
-  if (preflightMode.value === "resume") {
-    await resumePath({ force, routeAlreadySynced: preflightRouteAlreadySynced.value, commandToken, commandDraft, authorityFence, emptyRouteMode });
-  } else if (preflightMode.value === "start-existing") {
-    await startExistingPath({ force, routeAlreadySynced: preflightRouteAlreadySynced.value, commandToken, commandDraft, authorityFence, emptyRouteMode });
-  } else {
-    await executePath({ force });
-  }
-}
-
-async function syncMissionRemaining(mission, {
-  draft = pathMissionBase,
-  items = null,
-  finishBehavior = missionFinishBehavior.value,
-} = {}) {
-  const authorityToken = beginMissionAuthorityRequest(mission);
-  const remaining = items || pathWaypoints.value.filter((waypoint) =>
-    waypoint.state === "pending" || waypoint.state === "active");
-  assertRouteMatchesCourse(remaining, mission.course_id);
-  const body = buildMissionRemainingPayload({
-    draft,
-    mission,
-    finishBehavior,
-    items: remaining,
-  });
-  const response = await roverRequest(`/api/missions/${mission.id}/remaining`, {
-    method: "PUT",
-    body: JSON.stringify(body),
-  });
-  const edited = await response.json();
-  const authoritativeMission = resolveMissionHttpSnapshot(edited, authorityToken);
-  if (!authoritativeMission) throw missionAuthorityAdvancedError(authorityToken);
-  return authoritativeMission;
-}
-
-const MISSION_COMMAND_LABELS = {
-  start: "mission start",
-  resume: "mission resume",
-  pause: "mission pause",
-  end: "mission end",
-};
-
-function applyMissionCommandResponse(data, action, authorityToken) {
-  const decision = action === "end"
-    ? missionEndResponseDecision(data, terminalMissionIds)
-    : missionCommandResponseDecision(data);
-  if (decision.mission && decision.keepMission !== false) {
-    resolveMissionHttpSnapshot(decision.mission, authorityToken);
-  }
-  if (action === "end") {
-    const awaiting = missionEndAwaitingState({
-      awaitingMissionId: missionEndAwaitingAckId.value,
-      awaitingCommandId: missionEndAwaitingCommandId.value,
-      authorityMission: activeMissionAuthority.value,
-      responseDecision: decision,
-    });
-    missionEndAwaitingAckId.value = awaiting.missionId;
-    missionEndAwaitingCommandId.value = awaiting.commandId;
-    cancelMissionEndReconcile();
-    if (!decision.mission && decision.releaseAwaitingAcknowledgement
-        && missionAuthorityRequestIsCurrent(authorityToken)) {
-      missionEndAwaitingAckId.value = null;
-      missionEndAwaitingCommandId.value = null;
-    }
-  }
-  if (decision.failed) {
-    notifyError(`The ${MISSION_COMMAND_LABELS[action] || "mission"} command did not reach the rover. `
-      + "The rover may keep moving. Check the screen and the field, and be ready to stop it safely.");
-    if (!decision.mission) void fetchRoverStatus();
-    return false;
-  }
-  return true;
-}
-
-function applyMissionEndFailureAuthority(missionId, authorityMission) {
-  const awaiting = missionEndRequestFailureState({
-    awaitingMissionId: missionEndAwaitingAckId.value,
-    awaitingCommandId: missionEndAwaitingCommandId.value,
-    requestedMissionId: missionId,
-    authorityMission,
-  });
-  missionEndAwaitingAckId.value = awaiting.missionId;
-  missionEndAwaitingCommandId.value = awaiting.commandId;
-  cancelMissionEndReconcile();
-}
-
-function cancelMissionEndReconcile() {
-  missionEndReconcileEpoch += 1;
-  if (missionEndReconcileTimer != null) {
-    clearTimeout(missionEndReconcileTimer);
-    missionEndReconcileTimer = null;
-  }
-}
-
-function scheduleMissionEndReconcile(missionId) {
-  if (missionEndReconcileTimer != null || !missionEndReconcileShouldRetry({
-    awaitingMissionId: missionEndAwaitingAckId.value,
-    requestedMissionId: missionId,
-  })) return;
-  const expectedEpoch = missionEndReconcileEpoch;
-  missionEndReconcileTimer = setTimeout(() => {
-    missionEndReconcileTimer = null;
-    void reconcileMissionEndRequestFailure(missionId, expectedEpoch);
-  }, 1000);
-}
-
-async function reconcileMissionEndRequestFailure(
-  missionId,
-  expectedEpoch = missionEndReconcileEpoch,
-) {
-  const authorityGenerationAtStart = missionAuthorityGeneration;
-  const applyFailureAuthority = (authorityMission) => {
-    applyMissionEndFailureAuthority(missionId, authorityMission);
-    reconcileRoverMode(roverStatus.value);
-  };
-  const result = await reconcileMissionEndAuthorityRequest({
-    requestedMissionId: missionId,
-    expectedEpoch,
-    authorityGenerationAtStart,
-    getCurrentState: () => ({
-      epoch: missionEndReconcileEpoch,
-      awaitingMissionId: missionEndAwaitingAckId.value,
-      authorityGeneration: missionAuthorityGeneration,
-      authorityMission: activeMissionAuthority.value,
-    }),
-    fetchActiveMission: async () => {
-      const response = await roverRequest("/api/missions/active", { method: "GET" });
-      const data = await response.json();
-      return data.mission || null;
-    },
-  });
-  if (result.outcome === "stale") return;
-  if (result.outcome === "retry") {
-    // Keep the destructive-action lock until an authoritative active snapshot
-    // or terminal SSE resolves the uncertain End request.
-    scheduleMissionEndReconcile(missionId);
-    return;
-  }
-  if (result.installResponse) {
-    installActiveMissionSnapshot(result.authorityMission);
-    if (!missionEndReconcileIsCurrent({
-      expectedEpoch,
-      currentEpoch: missionEndReconcileEpoch,
-      awaitingMissionId: missionEndAwaitingAckId.value,
-      requestedMissionId: missionId,
-    })) return;
-  }
-  applyFailureAuthority(result.authorityMission);
-}
-
-async function startExistingPath(opts = {}) {
-  const mission = activeMission.value;
-  if (!mission) return;
-  let authorityToken = null;
-  try {
-    if (!missionAuthorityFenceIsCurrent(opts.authorityFence)) {
-      throw missionAuthorityAdvancedError(opts.authorityFence);
-    }
-    const preflightCommandBody = buildMissionCommandPayload({
-      token: opts.commandToken,
-      missionId: mission.id,
-      force: opts.force,
-    });
-    roverMode.value = "executing";
-    const edited = opts.routeAlreadySynced ? mission : await syncMissionRemaining(mission, { draft: opts.commandDraft });
-    const commandAuthorityFence = opts.routeAlreadySynced
-      ? opts.authorityFence
-      : currentMissionAuthorityFence(edited);
-    const commandBody = opts.routeAlreadySynced ? preflightCommandBody : buildMissionCommandPayload({
-      token: missionCommandTokenAfterSync({
-        routeAlreadySynced: opts.routeAlreadySynced,
-        preflightToken: opts.commandToken,
-        editedMission: edited,
-      }),
-      missionId: edited.id,
-      force: opts.force,
-    });
-    authorityToken = beginMissionAuthorityRequest(edited);
-    if (!missionAuthorityFenceIsCurrent(commandAuthorityFence)) {
-      throw missionAuthorityAdvancedError(authorityToken);
-    }
-    const response = await roverRequest(`/api/missions/${edited.id}/start`, {
-      method: "POST",
-      body: JSON.stringify(commandBody),
-    });
-    const data = await response.json();
-    applyMissionCommandResponse(data, "start", authorityToken);
-  } catch (error) {
-    authorityToken = error.missionAuthorityRequestToken || authorityToken;
-    if (missionAuthorityRequestIsCurrent(authorityToken)) roverMode.value = "stopped";
-    else reconcileRoverMode(roverStatus.value);
-    notifyError(error.message);
-  }
-}
-
-// Throws the same reason a course host reports for a stale route, so callers
-// reload the cones and ask the operator to review the route again.
-function assertRouteMatchesCourse(items, courseId) {
-  const mismatch = missionRouteCourseMismatch(items, conesMap.value[courseId] || []);
-  if (!mismatch) return;
-  throw Object.assign(new Error(`Cone ${mismatch.position + 1} changed after the preflight check. Review the latest route.`), {
-    status: 409,
-    data: { reason: "cone_snapshot_mismatch", ...mismatch },
-  });
-}
-
-async function executePath(opts = {}) {
-  if (pathWaypoints.value.length === 0) return;
-  executedIndex.value = 0;
-  executionStartIdx = 0;
-  pathProgress.value = 0;
-  clearSprayMarkers();
-  roverMode.value = "executing";
-  const createRequestId = ++localMissionCreateRequestSeq;
-  const routeToken = captureMissionCreateRouteAuthority({
-    requestId: createRequestId,
-    courseId: activeCourseId.value,
-    routeGeneration: localMissionRouteGeneration,
-  });
-  localMissionCreatePending = true;
-  let authorityToken = null;
-  try {
-    authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-    const course = courses.value.find((c) => c.id === activeCourseId.value);
-    if (!course) throw new Error("Course not found.");
-    assertRouteMatchesCourse(pathWaypoints.value, course.id);
-    const createResponse = await roverRequest("/api/missions", {
-      method: "POST",
-      body: JSON.stringify(buildMissionCreatePayload({
-        course,
-        finishBehavior: missionFinishBehavior.value,
-        items: pathWaypoints.value,
-        presetReference: pathPresetReference.value?.courseId === activeCourseId.value
-          ? pathPresetReference.value : null,
-      })),
-    });
-    const created = await createResponse.json();
-    // Keep the course as it was at mission creation, best effort: a host may not
-    // let this operator take snapshots, and the mission itself holds the route.
-    void courseRequest(`/api/courses/${course.id}/snapshots`, {
-      method: "POST",
-      body: JSON.stringify({ reason: `auto: create mission #${created.mission?.id ?? created.id}` }),
-    }).catch(() => {});
-    const mission = resolveMissionHttpSnapshot(created, authorityToken, { expectedLocalMission: true });
-    if (!mission) throw missionAuthorityAdvancedError(authorityToken);
-    if (!missionCreateRouteAuthorityMatches({
-      token: routeToken,
-      latestRequestId: localMissionCreateRequestSeq,
-      currentCourseId: activeCourseId.value,
-      currentRouteGeneration: localMissionRouteGeneration,
-    })) {
-      roverMode.value = "stopped";
-      notifyWarn("The mission was created but not started because the reviewed course or route changed. Check the latest route.");
-      return;
-    }
-    authorityToken = beginMissionAuthorityRequest(mission);
-    const startResponse = await roverRequest(`/api/missions/${mission.id}/start`, {
-      method: "POST",
-      body: JSON.stringify(buildMissionCommandPayload({
-        token: missionCommandToken(mission),
-        missionId: mission.id,
-        force: opts.force,
-      })),
-    });
-    const started = await startResponse.json();
-    applyMissionCommandResponse(started, "start", authorityToken);
-  } catch (err) {
-    authorityToken = err.missionAuthorityRequestToken || authorityToken;
-    if (missionAuthorityRequestIsCurrent(authorityToken)) {
-      roverMode.value = activeMission.value ? "stopped" : "path-ready";
-    } else {
-      reconcileRoverMode(roverStatus.value);
-    }
-    notifyError(err.message);
-    if (err.data?.reason === "cone_snapshot_mismatch") {
-      await fetchAll();
-      if (map && !isMissionsView.value) rebuildAllMarkers();
-    }
-  } finally {
-    const settlement = missionCreateSettlementDecision({
-      requestId: createRequestId,
-      latestRequestId: localMissionCreateRequestSeq,
-      authorityMission: activeMissionAuthority.value,
-      hasFullSnapshot: activeMission.value != null,
-    });
-    if (createRequestId === localMissionCreateRequestSeq) localMissionCreatePending = false;
-    if (settlement.clearLocalRoute) clearPath({ endMissionOnServer: false });
-    if (settlement.recoverSnapshot) void fetchActiveMissionSnapshot(activeMissionAuthority.value);
-  }
-}
-
-async function resumePath(opts = {}) {
-  const mission = activeMission.value;
-  if (!mission) {
-    notifyError("No active mission to resume.");
-    return;
-  }
-  let authorityToken = null;
-  try {
-    if (!missionAuthorityFenceIsCurrent(opts.authorityFence)) {
-      throw missionAuthorityAdvancedError(opts.authorityFence);
-    }
-    const preflightCommandBody = buildMissionCommandPayload({
-      token: opts.commandToken,
-      missionId: mission.id,
-      force: opts.force,
-    });
-    const remaining = pathWaypoints.value.filter((waypoint) =>
-      waypoint.state === "pending" || waypoint.state === "active");
-    executionStartIdx = pathWaypoints.value.length - remaining.length;
-    executedIndex.value = executionStartIdx;
-    roverMode.value = "executing";
-    const edited = opts.routeAlreadySynced ? mission : await syncMissionRemaining(mission, { draft: opts.commandDraft });
-    const commandAuthorityFence = opts.routeAlreadySynced
-      ? opts.authorityFence
-      : currentMissionAuthorityFence(edited);
-    const commandBody = opts.routeAlreadySynced ? preflightCommandBody : buildMissionCommandPayload({
-      token: missionCommandTokenAfterSync({
-        routeAlreadySynced: opts.routeAlreadySynced,
-        preflightToken: opts.commandToken,
-        editedMission: edited,
-      }),
-      missionId: edited.id,
-      force: opts.force,
-    });
-    authorityToken = beginMissionAuthorityRequest(edited);
-    if (!missionAuthorityFenceIsCurrent(commandAuthorityFence)) {
-      throw missionAuthorityAdvancedError(authorityToken);
-    }
-    const resumeResponse = await roverRequest(`/api/missions/${edited.id}/resume`, {
-      method: "POST",
-      body: JSON.stringify(commandBody),
-    });
-    const resumed = await resumeResponse.json();
-    applyMissionCommandResponse(resumed, "resume", authorityToken);
-  } catch (err) {
-    authorityToken = err.missionAuthorityRequestToken || authorityToken;
-    if (missionAuthorityRequestIsCurrent(authorityToken)) roverMode.value = "stopped";
-    else reconcileRoverMode(roverStatus.value);
-    notifyError(err.message);
-  }
-}
-
-function updatePathProgress(lat, lng) {
-  if (pathTotalDist === 0) return;
-  if (pathWaypoints.value.length === 0) {
-    if (missionFinishBehavior.value !== "return_to_start" || !pathStart) return;
-    const remaining = haversine({ lat, lng }, pathStart);
-    const walked = Math.max(0, pathTotalDist - remaining);
-    pathProgress.value = Math.min(100, Math.round((walked / pathTotalDist) * 100));
-    return;
-  }
-  // Interpolate progress using cumulative segment distance. executedIndex is
-  // advanced monotonically by the rover:waypoint SSE event, never by proximity.
-  const idx = executedIndex.value;
-  const prevPoint = idx === 0 ? pathStart : pathWaypoints.value[idx - 1];
-  const prevCum = idx === 0 ? 0 : pathCumDist[idx - 1];
-  const nextPoint = idx < pathWaypoints.value.length ? pathWaypoints.value[idx] : pathStart;
-  const segLen = haversine(prevPoint, nextPoint);
-  const traversed = segLen > 0 ? Math.min(segLen, haversine(prevPoint, { lat, lng })) : 0;
-  const walked = prevCum + traversed;
-  pathProgress.value = Math.min(100, Math.round((walked / pathTotalDist) * 100));
-}
-
-function onWaypointReached(localIdx) {
-  // Navigator reports local indices into the waypoint list it received; map
-  // those back onto the global list and advance monotonically.
-  const globalIdx = executionStartIdx + localIdx;
-  if (globalIdx + 1 > executedIndex.value && globalIdx < pathWaypoints.value.length) {
-    executedIndex.value = globalIdx + 1;
-    if (pathTotalDist > 0) {
-      const walked = pathCumDist[executedIndex.value - 1] ?? pathTotalDist;
-      pathProgress.value = Math.min(100, Math.round((walked / pathTotalDist) * 100));
-    }
-  }
-}
-
-/* ── Soft pause / resume ──────────────────────────────
-   A soft pause holds the mission WITHOUT the E-Stop latch, so the operator can
-   drive manually (e.g. around an obstacle) and then resume from the current
-   waypoint. Pause is only meaningful while the rover is actually driving the
-   mission; resume is offered whenever nav_state is PAUSED. */
-const PAUSABLE_NAV = new Set(["CALIBRATING", "NAVIGATING", "SETTLING", "SPRAYING"]);
-const pauseBusy = ref(false);
-async function pauseMission() {
-  if (pauseBusy.value) return;
-  if (!activeMission.value?.id) return;
-  pauseBusy.value = true;
-  try {
-    const authorityToken = beginMissionAuthorityRequest(activeMissionAuthority.value);
-    const response = await roverRequest(`/api/missions/${activeMission.value.id}/pause`, { method: "POST" });
-    const data = await response.json();
-    applyMissionCommandResponse(data, "pause", authorityToken);
-  } catch (err) {
-    notifyError(`Failed to pause: ${err.message}`);
-  } finally {
-    pauseBusy.value = false;
-  }
-}
-async function resumeMission() {
-  if (pauseBusy.value || !activeMission.value?.id) return;
-  openPreflight("resume");
-}
-
-/* ── Manual control ───────────────────────────────── */
-function startManualControl() {
-  if (manualAuthorityReleaseBusy.value) return;
-  if (!roverStatus.value.connected) {
-    notifyWarn("The rover is not connected.");
-    return;
-  }
-  // During a soft pause the operator drives manually to clear an obstacle, then
-  // resumes — so KEEP the mission overlay/progress. clearPath() would not only
-  // wipe the overlay (only rebuilt on mount/SSE-reconnect) but also POST
-  // /api/rover/end-mission, abandoning the very mission we want to resume.
-  // Outside a pause, manual mode discards any in-progress path pick as before.
-  if (!missionHeld.value) clearPath();
-  roverMode.value = "manual";
-  manualThrottle.value = 0;
-  manualSteering.value = 0;
-  manualFailCount = 0;
-  sendControl();
-  controlInterval = setInterval(sendControl, 50);
-}
-
-function stopManualControl() {
-  if (manualAuthorityReleaseBusy.value) return;
-  if (controlInterval) { clearInterval(controlInterval); controlInterval = null; }
-  manualThrottle.value = 0;
-  manualSteering.value = 0;
-  manualFailCount = 0;
-  sendControl();
-  if (roverMode.value === "manual") {
-    // Fail the pump off when leaving manual mode. The PUMP toggle only
-    // exists in manual mode, so exiting it (operator click OR the 5-fail
-    // auto-release above) must not strand a running liquid pump — the same
-    // asymmetry we avoid on E-Stop / heartbeat loss. Best-effort: on a lost
-    // link this POST also fails, but then the MCU heartbeat fail-safe stops
-    // the pump anyway.
-    if (pumpOn.value) {
-      roverRequest("/api/rover/pump", {
-        method: "POST",
-        body: JSON.stringify({ on: false }),
-      }).catch(() => {});
-    }
-    roverMode.value = "none";
-    // Snap straight back to the server-truth mode — e.g. if the operator was
-    // manually clearing an obstacle during a soft pause, this re-shows the
-    // Resume button immediately instead of waiting for the next status tick.
-    reconcileRoverMode(roverStatus.value);
-  }
-}
-
-async function releaseManualForMissionAuthority() {
-  if (manualAuthorityReleaseBusy.value) return;
-  manualAuthorityReleaseBusy.value = true;
-  if (controlInterval) { clearInterval(controlInterval); controlInterval = null; }
-  activePointerId = null;
-  manualThrottle.value = 0;
-  manualSteering.value = 0;
-  manualFailCount = 0;
-  syncJoystickDom();
-  // A slow non-zero POST may already be in flight when the remote mission
-  // snapshot arrives. Wait for every request issued before interval shutdown,
-  // then make zero the final manual command observed by the server.
-  await waitForManualControlDrain(pendingManualControlRequests);
-  try {
-    await roverRequest("/api/rover/control", {
-      method: "POST",
-      body: JSON.stringify({ throttle: 0, steering: 0 }),
-    });
-  } catch (error) {
-    notifyError(`Another operator resumed the mission, so manual control stopped, but the zero command was not confirmed: ${error.message}. `
-      + "Check the rover's autonomous driving state and the field immediately.");
-  }
-  if (pumpOn.value) {
-    try {
-      await roverRequest("/api/rover/pump", {
-        method: "POST",
-        body: JSON.stringify({ on: false }),
-      });
-    } catch (error) {
-      notifyError(`Could not confirm the pump stopped during the server mission handover: ${error.message}`);
-    }
-  }
-  manualThrottle.value = 0;
-  manualSteering.value = 0;
-  roverMode.value = "none";
-  manualAuthorityReleaseBusy.value = false;
-  reconcileRoverMode(roverStatus.value);
-}
-
-async function sendControl() {
-  try {
-    await trackManualControlRequest(pendingManualControlRequests, roverRequest("/api/rover/control", {
-      method: "POST",
-      body: JSON.stringify({ throttle: manualThrottle.value, steering: manualSteering.value }),
-    }));
-    manualFailCount = 0;
-  } catch {
-    manualFailCount++;
-    // 5 consecutive failures (~250ms) → auto-release manual control
-    if (manualFailCount >= 5 && roverMode.value === "manual") {
-      stopManualControl();
-      notifyWarn("Rover connection lost; manual control released.");
-    }
-  }
 }
 
 // Fullscreen toggle (status-strip button). The only way a normal tab can hide
@@ -4862,22 +2549,6 @@ async function toggleFullscreen() {
     else await document.documentElement.requestFullscreen();
   } catch (e) {
     notifyWarn(`Failed to toggle fullscreen: ${e?.message || e}`);
-  }
-}
-
-async function togglePump() {
-  if (pumpBusy.value) return;
-  pumpBusy.value = true;
-  const next = !pumpOn.value;
-  try {
-    await roverRequest("/api/rover/pump", {
-      method: "POST",
-      body: JSON.stringify({ on: next }),
-    });
-  } catch (e) {
-    notifyWarn(`Pump control failed: ${e?.message || e}`);
-  } finally {
-    pumpBusy.value = false;
   }
 }
 
@@ -4920,6 +2591,10 @@ function syncJoystickDom() {
   if (info) info.textContent = `T: ${manualThrottle.value} / S: ${manualSteering.value}`;
 }
 
+// Mission handovers and releases zero the controls from the store.
+watch([manualThrottle, manualSteering], syncJoystickDom);
+watch(manualAuthorityReleaseBusy, (busy) => { if (busy) activePointerId = null; });
+
 function updateJoystick(e) {
   if (manualAuthorityReleaseBusy.value || !joystickRect) return;
   const cx = joystickRect.left + joystickRect.width / 2;
@@ -4938,232 +2613,7 @@ function updateJoystick(e) {
   syncJoystickDom();
 }
 
-/* ── SSE ──────────────────────────────────────────── */
-
-// 손상된 SSE 프레임 하나가 해당 리스너를 통째로 죽이고 이벤트를 조용히 삼키지
-// 않도록, 파싱 실패는 null로 처리하고 리스너가 조기 반환한다 (traffic useSSE 관행).
-function parseSSE(e) {
-  try { return JSON.parse(e.data); } catch { return null; }
-}
-
-function connectSSE() {
-  // Course edits stream from the host; rover and GPS events from each device.
-  const courseEvents = host.course.events();
-  const roverEvents = host.devices.transport("rover")?.events() ?? null;
-  const gpsEvents = host.devices.transport("gps")?.events() ?? null;
-  eventStreams = [courseEvents, roverEvents, gpsEvents].filter(Boolean);
-
-  // Events emitted while a link is down are lost; resynchronize once it is back.
-  const droppedLinks = new Set();
-  function watchLink(stream, name, resync) {
-    stream.addEventListener("error", () => {
-      droppedLinks.add(name);
-      sseReconnecting.value = true;
-    });
-    stream.addEventListener("open", () => {
-      if (!droppedLinks.delete(name)) return;
-      if (droppedLinks.size === 0) sseReconnecting.value = false;
-      resync();
-    });
-  }
-  watchLink(courseEvents, "course", () =>
-    fetchAll().then(() => { if (map && !isMissionsView.value) rebuildAllMarkers(); }));
-  if (roverEvents) watchLink(roverEvents, "rover", () => fetchRoverStatus());
-  if (gpsEvents) {
-    watchLink(gpsEvents, "gps", () => fetchGpsStatus());
-    gpsEvents.addEventListener("error", () => { gpsOnline.value = false; });
-    gpsEvents.addEventListener("gps:status", (e) => {
-      const data = parseSSE(e);
-      if (!data) return;
-      gpsStatus.value = data;
-      gpsOnline.value = true;
-    });
-  }
-
-  courseEvents.addEventListener("init", (e) => {
-    const data = parseSSE(e);
-    if (data) courses.value = data.courses;
-  });
-
-  courseEvents.addEventListener("courses", (e) => {
-    const data = parseSSE(e);
-    if (!data) return;
-    courses.value = data.courses;
-    for (const id of Object.keys(conesMap.value)) {
-      if (!data.courses.find((c) => c.id === parseInt(id))) {
-        delete conesMap.value[id];
-        delete memosMap.value[id];
-        delete routeMap.value[id];
-        delete visibility.value[id];
-      }
-    }
-    if (activeCourseId.value && !data.courses.find((c) => c.id === activeCourseId.value)) {
-      activeCourseId.value = data.courses[0]?.id || null;
-    }
-  });
-
-  courseEvents.addEventListener("cones", (e) => {
-    const data = parseSSE(e);
-    if (!data) return;
-    conesMap.value[data.courseId] = data.cones;
-    // Keep the course list's "(N)" count live. Cone add/delete only broadcasts
-    // `cones` (not `courses`), so without this the count would go stale.
-    const course = courses.value.find((c) => c.id === data.courseId);
-    if (course) course.cone_count = data.cones.length;
-    // 리플레이(기록) 뷰에서는 라이브 콘 마커를 다시 그리지 않는다(라이브 복귀 시 재구축).
-    // 변경된 코스만 타겟 재구축 — 다른 코스의 마커는 건드리지 않는다.
-    if (map && !suppressRebuild && !isMissionsView.value) rebuildAllMarkers(data.courseId);
-  });
-
-  courseEvents.addEventListener("memos", (e) => {
-    const data = parseSSE(e);
-    if (!data) return;
-    // 내가 드래그/리사이즈/입력 중인 코스면 에코로 편집 중 배열이 교체돼 조작이
-    // 끊긴다. 그 경우 건너뛰고, 조작 종료 후의 PATCH 에코가 최종 상태로 맞춘다.
-    if (memoBusy && data.courseId === activeCourseId.value) return;
-    memosMap.value[data.courseId] = data.memos;
-  });
-
-  courseEvents.addEventListener("route", (e) => {
-    const data = parseSSE(e);
-    if (!data) return;
-    routeMap.value[data.courseId] = { markers: data.markers || [], steps: data.steps || [] };
-  });
-
-  roverEvents?.addEventListener("rover", (e) => {
-    const data = parseSSE(e);
-    if (!data || !isValidRoverPos(data.lat, data.lng)) return;
-    setDeviceMarker("rover", data.lat, data.lng);
-    if (followRover.value) scheduleFollow(data.lat, data.lng);
-    if (roverMode.value === "executing") updatePathProgress(data.lat, data.lng);
-  });
-
-  roverEvents?.addEventListener("rover:status", (e) => {
-    const data = parseSSE(e);
-    if (!data) return;
-    const missionStatus = splitMissionStatusPayload(data);
-    roverStatus.value = { ...roverStatus.value, ...missionStatus.status };
-    if (missionStatus.hasActiveMissionSummary) {
-      applyActiveMissionSummary(missionStatus.activeMissionSummary);
-    }
-    syncAppRoverStatus(data);
-    // Draw BOTH device markers (rover + receiver) from the snapshot.
-    syncDeviceMarkers(roverStatus.value);
-    // Follow + mission path-progress track the ROVER's position. Doing path
-    // progress here (not only in the "rover" event) keeps the executing overlay
-    // advancing even when the receiver is the active source — the server then
-    // suppresses the rover's live "rover" event, but rover:status still fires.
-    const rlp = data.last_position;
-    if (rlp && typeof rlp.lat === "number" && typeof rlp.lng === "number") {
-      if (followRover.value) scheduleFollow(rlp.lat, rlp.lng);
-      if (roverMode.value === "executing") updatePathProgress(rlp.lat, rlp.lng);
-    }
-    // If the rover disconnected mid-manual-control, release immediately.
-    if (!data.connected && roverMode.value === "manual") {
-      stopManualControl();
-    }
-    reconcileRoverMode(roverStatus.value);
-  });
-
-  roverEvents?.addEventListener("rover:mission", (e) => {
-    const data = parseSSE(e);
-    const mission = data?.mission;
-    if (!mission) {
-      applyAuthoritativeMissionAbsence();
-      return;
-    }
-    if (mission.status === "completed") {
-      rememberTerminalMission(mission.id);
-      if (missionEndAwaitingAckId.value === mission.id) {
-        missionEndAwaitingAckId.value = null;
-        missionEndAwaitingCommandId.value = null;
-        cancelMissionEndReconcile();
-      }
-      notifySuccess("Mission completed.");
-      applyAuthoritativeMissionAbsence();
-      return;
-    }
-    if (mission.status === "cancelled") {
-      rememberTerminalMission(mission.id);
-      if (missionEndAwaitingAckId.value === mission.id) {
-        missionEndAwaitingAckId.value = null;
-        missionEndAwaitingCommandId.value = null;
-        cancelMissionEndReconcile();
-      }
-      applyAuthoritativeMissionAbsence();
-      return;
-    }
-    installActiveMissionSnapshot(mission);
-    reconcileRoverMode(roverStatus.value);
-  });
-
-  roverEvents?.addEventListener("rover:waypoint", (e) => {
-    const data = parseSSE(e);
-    if (!shouldConsumeLegacyMissionIndexEvent({
-      activeMission: activeMission.value,
-      connectedProtocol: roverStatus.value.mission_protocol?.connected,
-    })) return;
-    if (roverMode.value === "executing" && Number.isInteger(data?.index)) {
-      onWaypointReached(data.index);
-    }
-  });
-
-  roverEvents?.addEventListener("rover:skipped", (e) => {
-    const data = parseSSE(e);
-    if (!shouldConsumeLegacyMissionIndexEvent({
-      activeMission: activeMission.value,
-      connectedProtocol: roverStatus.value.mission_protocol?.connected,
-    })) return;
-    if (roverMode.value === "executing" && Number.isInteger(data?.index)) {
-      // Stuck-skip: navigator advanced _cur_seg_idx past this waypoint
-      // without firing waypoint_reached. Advance executedIndex the same
-      // way the reached event would, otherwise the counter sits on the
-      // skipped index until the *next* waypoint reports reached — at
-      // which point it jumps by 2 and the skip becomes invisible.
-      onWaypointReached(data.index);
-      notifyWarn(`Skipped waypoint #${data.index + 1} (stuck)`);
-    }
-  });
-
-  roverEvents?.addEventListener("rover:spray", (e) => {
-    const data = parseSSE(e);
-    if (!shouldConsumeLegacyMissionIndexEvent({
-      activeMission: activeMission.value,
-      connectedProtocol: roverStatus.value.mission_protocol?.connected,
-    })) return;
-    if (!Number.isInteger(data?.waypoint) || !data.outcome) return;
-    onSprayResult(data.waypoint, data.outcome);
-  });
-
-  // Base-station survey outcome — surface success/failure to the operator (a
-  // failed survey otherwise just silently reverts to "Not surveyed").
-  gpsEvents?.addEventListener("gps:survey_result", (e) => {
-    const data = parseSSE(e);
-    if (!data) return;
-    // Survey is an admin-only workflow; don't toast its outcome to other operators.
-    if (!canOperateRover.value) return;
-    if (data.ok) {
-      notifySuccess(`Survey complete: ${data.name}${data.samples != null ? ` (${data.samples} samples)` : ""}`);
-    } else {
-      const reason = {
-        insufficient_samples: "Not enough RTK fixed samples.",
-        unstable: "The position did not stabilize. Check the GPS unit setup.",
-      }[data.error] || "Could not collect RTK fixed samples.";
-      notifyError(`Survey failed: ${data.name || "survey point"} — ${reason}`);
-    }
-  });
-}
-
-function onSprayResult(localIdx, outcome) {
-  // Navigator/spray_node publish local indices; translate to the global list.
-  const globalIdx = executionStartIdx + localIdx;
-  if (globalIdx < 0 || globalIdx >= pathWaypoints.value.length) return;
-  sprayResults.value.set(globalIdx, { outcome, at: Date.now() });
-  // Trigger reactive update for Map
-  sprayResults.value = new Map(sprayResults.value);
-  renderSprayMarkers();
-}
-
+/* ── Spray outcomes ───────────────────────────────── */
 function renderSprayMarkers() {
   if (!map) return;
   for (const [idx, marker] of Object.entries(sprayMarkers)) {
@@ -5190,224 +2640,7 @@ function renderSprayMarkers() {
     }).addTo(map);
   }
 }
-
-function clearSprayMarkers() {
-  for (const marker of Object.values(sprayMarkers)) {
-    try { map.removeLayer(marker); } catch {}
-  }
-  sprayMarkers = {};
-  sprayResults.value = new Map();
-}
-
-function applyAuthoritativeMissionAbsence(options = {}) {
-  const authorityMissionId = activeMissionAuthority.value?.id;
-  const decision = missionAbsentSnapshotDecision({
-    displayedMissionId,
-    authorityMissionId,
-    awaitingMissionId: missionEndAwaitingAckId.value,
-  });
-  observeMissionAuthority(null, options);
-  if (decision.terminalMissionId != null) rememberTerminalMission(decision.terminalMissionId);
-  activeMissionSnapshotRequestSeq += 1;
-  activeMissionSnapshotRequestKey = null;
-  roverStatus.value = { ...roverStatus.value, active_mission: null };
-  missionEndAwaitingAckId.value = null;
-  missionEndAwaitingCommandId.value = null;
-  cancelMissionEndReconcile();
-  if (decision.clearsDisplayedMission) clearPath({ endMissionOnServer: false });
-  reconcileRoverMode(roverStatus.value);
-}
-
-function installActiveMissionSnapshot(mission, options = {}) {
-  if (!mission) {
-    applyAuthoritativeMissionAbsence(options);
-    return;
-  }
-  if (["completed", "cancelled"].includes(mission.status)) {
-    rememberTerminalMission(mission.id);
-    applyAuthoritativeMissionAbsence(options);
-    return;
-  }
-  observeMissionAuthority(mission, options);
-  roverStatus.value = { ...roverStatus.value, active_mission: mission };
-  restoreActiveMission(mission, options);
-}
-
-async function fetchActiveMissionSnapshot(expectedSummary) {
-  const expectedKey = missionAuthorityKey(expectedSummary);
-  if (expectedKey == null || activeMissionSnapshotRequestKey === expectedKey) return;
-  const requestId = ++activeMissionSnapshotRequestSeq;
-  activeMissionSnapshotRequestKey = expectedKey;
-  try {
-    const response = await roverRequest("/api/missions/active", { method: "GET" });
-    const data = await response.json();
-    if (requestId !== activeMissionSnapshotRequestSeq
-        || missionAuthorityKey(activeMissionAuthority.value) !== expectedKey) return;
-    if (!data.mission) {
-      applyAuthoritativeMissionAbsence();
-      return;
-    }
-    if (!missionSnapshotMatchesSummary(data.mission, activeMissionAuthority.value)) return;
-    installActiveMissionSnapshot(data.mission);
-    reconcileRoverMode(roverStatus.value);
-  } catch { /* the next status summary retries recovery */ }
-  finally {
-    if (requestId === activeMissionSnapshotRequestSeq) activeMissionSnapshotRequestKey = null;
-  }
-}
-
-function applyActiveMissionSummary(summary) {
-  if (summary == null) {
-    applyAuthoritativeMissionAbsence();
-    return;
-  }
-  const refresh = missionSummaryRefreshDecision({
-    summary,
-    observedAuthorityKey: observedMissionAuthorityKey,
-    hasFullSnapshot: activeMission.value != null,
-  });
-  if (!refresh.valid) return;
-  if (refresh.unchanged) {
-    if (refresh.recoverSnapshot) void fetchActiveMissionSnapshot(summary);
-    return;
-  }
-  const merged = mergeMissionSummary(activeMission.value, summary);
-  if (merged) {
-    installActiveMissionSnapshot(merged);
-    reconcileRoverMode(roverStatus.value);
-    return;
-  }
-  observeMissionAuthority(summary);
-  alignCourseToMission(summary);
-  roverStatus.value = { ...roverStatus.value, active_mission: null };
-  if (displayedMissionId != null
-      || (pathWaypoints.value.length > 0 && !localMissionCreatePending)) {
-    clearPath({ endMissionOnServer: false });
-  }
-  void fetchActiveMissionSnapshot(summary);
-}
-
-async function fetchRoverStatus() {
-  const requestId = ++roverStatusMissionRequestSeq;
-  const authorityToken = captureMissionAuthorityRequest({
-    requestId,
-    authorityGeneration: missionAuthorityGeneration,
-    mission: activeMissionAuthority.value,
-  });
-  try {
-    const res = await roverRequest("/api/rover/status", { method: "GET" });
-    const data = await res.json();
-    const missionStatus = splitMissionStatusPayload(data);
-    roverStatus.value = { ...roverStatus.value, ...missionStatus.status };
-    syncAppRoverStatus(missionStatus.status);
-    // Draw both device markers from the cached server-side snapshot on first
-    // load — without this the map only shows them after the next live SSE frame.
-    syncDeviceMarkers(roverStatus.value);
-    // Restore in-flight mission so a tab reload during a mission doesn't lose
-    // the path overlay, waypoint counter, or spray markers.
-    const missionSnapshotCurrent = missionAuthorityRequestCanApply({
-      token: authorityToken,
-      latestRequestId: roverStatusMissionRequestSeq,
-      currentAuthorityGeneration: missionAuthorityGeneration,
-      currentMission: activeMissionAuthority.value,
-    });
-    if (missionSnapshotCurrent && missionStatus.hasActiveMission) {
-      installActiveMissionSnapshot(missionStatus.activeMission);
-    }
-    reconcileRoverMode(roverStatus.value);
-  } catch { /* best-effort */ }
-}
-
-function restoreActiveMission(mission, { expectedLocalMission = false } = {}) {
-  const authorityKey = missionAuthorityKey(mission);
-  if (displayedMissionId === mission?.id
-      && displayedMissionAuthorityKey === authorityKey) return;
-  const missionChanged = displayedMissionId !== mission?.id;
-  const decision = missionRestoreDecision({
-    mission,
-    displayedMissionId,
-    localWaypointCount: pathWaypoints.value.length,
-  });
-  if (!decision.restore) return;
-
-  alignCourseToMission(mission);
-  const builderMissionEditable = missionMotionConfirmedHeld(mission);
-  if (showMissionBuilder.value
-      && (!builderMissionEditable || !missionDraftMatches(missionBuilderBase.value, mission))) {
-    showMissionBuilder.value = false;
-    missionBuilderBase.value = null;
-    notifyWarn("The server mission route changed, so the open draft was closed. Check the latest route.");
-  } else if (decision.discardsLocalDraft && !expectedLocalMission && !localMissionCreatePending) {
-    notifyWarn("Replaced the local route draft with the server mission another operator activated.");
-  }
-
-  displayedMissionId = mission.id;
-  displayedMissionAuthorityKey = authorityKey;
-  pathPresetReference.value = null;
-  pathWaypoints.value = mission.waypoints
-    .filter((waypoint) => waypoint.state !== "skipped")
-    .map((waypoint) => ({ ...waypoint, waypoint_id: waypoint.id }));
-  executedIndex.value = pathWaypoints.value.filter((waypoint) => waypoint.state === "completed").length;
-  pathMissionBase = missionDraftToken(mission);
-  missionFinishBehavior.value = mission.finish_behavior || "stop";
-  const lp = roverStatus.value.last_position;
-  pathStart = mission.start_position
-    || ((lp && isValidRoverPos(lp.lat, lp.lng)) ? lp : pathWaypoints.value[0]);
-  if (pathWaypoints.value.length === 0 && missionFinishBehavior.value === "return_to_start" && pathStart) {
-    if (missionChanged || !pathReturnOrigin) {
-      pathReturnOrigin = lp && isValidRoverPos(lp.lat, lp.lng) ? { lat: lp.lat, lng: lp.lng } : null;
-    }
-  } else {
-    pathReturnOrigin = null;
-  }
-
-  // Rebuild path geometry + progress bar using renderPath's cumulative math.
-  renderPath();
-  if (pathTotalDist > 0 && executedIndex.value > 0) {
-    const walked = pathCumDist[executedIndex.value - 1] ?? pathTotalDist;
-    pathProgress.value = Math.min(100, Math.round((walked / pathTotalDist) * 100));
-  }
-
-  const restored = new Map();
-  pathWaypoints.value.forEach((waypoint, index) => {
-    if (waypoint.outcome) restored.set(index, { outcome: waypoint.outcome, at: waypoint.completed_at || 0 });
-  });
-  sprayResults.value = restored;
-  renderSprayMarkers();
-}
-
-// The durable mission record is the only lifecycle/progress authority. Generic
-// nav telemetry is deliberately ignored here: a delayed IDLE frame cannot
-// complete or restart a mission without a correlated protocol-v2 report.
-function reconcileRoverMode(s) {
-  const mission = activeMissionAuthority.value;
-  const held = missionMotionConfirmedHeld(mission);
-  if (missionNeedsManualRelease({ roverMode: roverMode.value, mission, held })) {
-    restoreActiveMission(mission);
-    void releaseManualForMissionAuthority();
-    return;
-  }
-  if (roverMode.value === "manual" && (!mission || missionHeld.value)) {
-    // Keep the joystick visible while an allowed held-mission reposition is in
-    // progress, but never let manual UI suppress a newer server route/course.
-    if (mission) restoreActiveMission(mission);
-    return;
-  }
-  if (mission) {
-    restoreActiveMission(mission);
-    if (["starting", "running", "pausing", "resuming"].includes(mission.status)) {
-      roverMode.value = "executing";
-    } else if (["ready", "paused", "interrupted"].includes(mission.status)) {
-      roverMode.value = "stopped";
-    }
-    return;
-  }
-  displayedMissionId = null;
-  if (roverMode.value === "executing" || roverMode.value === "stopped") {
-    roverMode.value = pathWaypoints.value.length ? "path-ready" : "none";
-    pathProgress.value = 0;
-  }
-}
+watch(sprayResults, () => { if (!isMissionsView.value) renderSprayMarkers(); });
 
 /* ── Mobile detection ─────────────────────────────── */
 function checkMobile() {
@@ -5476,10 +2709,8 @@ onMounted(async () => {
   window.addEventListener("keydown", onGlobalKeydown);
   document.addEventListener("click", onGlobalClickForChips);
   document.addEventListener("keydown", onGlobalKeyForChips);
-  // 1Hz tick so time-ago chips and disconnect-ago refresh without new SSE events.
-  uiTickInterval = setInterval(() => { uiTick.value = (uiTick.value + 1) % 3600; }, 1000);
   await host.devices.refresh().catch((error) => notifyError(`Could not load devices: ${error.message}`));
-  await fetchAll();
+  await course.fetchAll();
   await nextTick();
   await initMap();
   // Make the map measure its container before the first programmatic centre.
@@ -5488,7 +2719,7 @@ onMounted(async () => {
   // refreshes the cached size when it's available; if the container is still
   // 0×0, panToVisibleCenter's own guard falls back to a direct setView.
   map.invalidateSize({ pan: false, animate: false });
-  // fetchAll restores activeCourseId before initMap exists, so the
+  // course.fetchAll restores activeCourseId before initMap exists, so the
   // course watcher's pan was a no-op. Re-apply once the map is ready
   // so a refresh lands centered on the restored course's start (or first cone).
   if (activeCourseId.value != null) {
@@ -5499,35 +2730,26 @@ onMounted(async () => {
       panToVisibleCenter(startCone.lat, startCone.lng, { animate: false });
     }
   }
-  recomputeCenterline(); // draw the restored course's centerline on first paint
-  connectSSE();
+  course.recomputeCenterline(); // the restored course's centerline on first paint
+  drawCenterline();
+  state.connect();
   if (canOperateRover.value) {
-    fetchRoverStatus();
-    fetchGpsStatus();
+    mission.fetchRoverStatus();
+    gps.fetchStatus();
   }
   // Prime the GPS-management tab if it's the persisted active tab on load.
-  if (canOperateRover.value && activeTab.value === "gps") loadGps();
+  if (canOperateRover.value && activeTab.value === "gps") gps.loadConfig();
 });
 
 onUnmounted(() => {
-  stopReplay();
-  // MapView is the sole writer of the App-owned sseReconnecting ref; clear it
-  // so the "reconnecting" badge can't stick on after this view tears down.
-  sseReconnecting.value = false;
+  state.disconnect();
   window.removeEventListener("resize", checkMobile);
   document.removeEventListener("fullscreenchange", onFullscreenChange);
   window.removeEventListener("keydown", onGlobalKeydown);
   document.removeEventListener("click", onGlobalClickForChips);
   document.removeEventListener("keydown", onGlobalKeyForChips);
-  if (uiTickInterval) clearInterval(uiTickInterval);
-  cancelMissionEndReconcile();
-  if (controlInterval) clearInterval(controlInterval);
   if (calStatusPollHandle) clearInterval(calStatusPollHandle);
-  if (ledBrightnessTimer) clearTimeout(ledBrightnessTimer);
-  if (pumpDurationTimer) clearTimeout(pumpDurationTimer);
-  if (centerlineTimer) clearTimeout(centerlineTimer);
   if (followTimer != null) clearTimeout(followTimer);
-  for (const stream of eventStreams) stream.close();
   if (map) {
     teardownRotateHandle();
     map.getContainer().removeEventListener("pointerdown", onSelectionStart);
@@ -5988,15 +3210,6 @@ onUnmounted(() => {
             >
               <CourseMapIcon name="rotate" />
             </button>
-            <!-- Path pick overlay stays inside the map area -->
-            <div v-if="roverMode === 'path-pick'" class="map-overlay map-overlay-row">
-              <span>Click a start point on the map, or</span>
-              <button
-                class="btn btn-primary btn-sm"
-                :disabled="!roverStatus.connected || !roverStatus.last_position"
-                @click="computePathFromRover"
-              >Start from the rover position</button>
-            </div>
 
             <!-- Cone-add edit controls (courses tab) — bottom-right of the map. -->
             <div

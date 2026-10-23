@@ -42,6 +42,12 @@ export const MCU_FLAG = {
   ESTOP_LINE: 0x80,   // raw physical E-stop button line
 };
 
+// A device with no GPS fix reports (0, 0); trusting it would drop a marker on —
+// and pan the map to — Null Island, where the satellite basemap has no tiles.
+export function isValidRoverPos(lat, lng) {
+  return Number.isFinite(lat) && Number.isFinite(lng) && !(lat === 0 && lng === 0);
+}
+
 export function formatDurationSec(secs) {
   if (!isFinite(secs) || secs < 1) return null;
   if (secs < 60) return `~${Math.round(secs)}s`;
