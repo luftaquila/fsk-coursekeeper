@@ -99,7 +99,7 @@ CONF
     dns="$(tailscale status --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
     echo
     echo "FSK Coursekeeper GPS unit $VERSION is running."
-    echo "Console: Settings > Devices > add a GPS unit at https://$dns, then set its NGII login in the GPS tab"
+    echo "Console: Settings > Devices > add a GPS unit at https://$dns, then set its NGII login in its panel"
 }
 
 # Everything runs from main so that a command reading stdin cannot swallow the rest of a piped script.

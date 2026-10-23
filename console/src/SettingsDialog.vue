@@ -12,8 +12,8 @@ const props = defineProps({
 const emit = defineEmits(["close"]);
 const { error: notifyError } = useNotification();
 
-// A device's kind is fixed when it is added; the host names follow the device
-// READMEs' examples.
+// A device's kind is fixed when it is added; the host names follow the
+// README's examples.
 const KINDS = {
   rover: { label: "Rover", icon: "rover", example: "https://fsk-coursekeeper-rover.your-tailnet.ts.net" },
   gps: { label: "GPS unit", icon: "gps", example: "https://fsk-coursekeeper-gps.your-tailnet.ts.net" },

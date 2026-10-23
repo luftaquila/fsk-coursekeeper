@@ -30,7 +30,7 @@ export const FIX_STATUS_META = {
   no_fix: { tone: "bad", label: "No fix" },
 };
 
-// MCU status-flag bits (rover/mcu T-frame `flags`, see rover README).
+// MCU status-flag bits (rover/mcu T-frame `flags`, see rover/mcu/src/protocol.h).
 // The MCU status LED encodes these by colour (red=e-stop, magenta=undervolt,
 // yellow=heartbeat/batt-warn, orange=nav-GPS-lost); the nav state only says
 // "ERROR", so we decode them into a plain-English cause list.
