@@ -4,9 +4,11 @@
   "type": "module",
   "packageManager": "pnpm@11.25.0",
   "scripts": {
-    "test": "node --test --test-concurrency=2 'tests/course/*.test.mjs' 'tests/rover/*.test.mjs' 'tests/hub/*.test.mjs'"
+    "test": "node --test --test-concurrency=2 'tests/course/*.test.mjs' 'tests/rover/*.test.mjs' 'tests/hub/*.test.mjs'",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "1.58.2",
     "better-sqlite3": "^12.5.0",
     "vue": "^3.5.26"
   }

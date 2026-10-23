@@ -25,3 +25,7 @@ fp-info-cache
 *-save.kicad_pcb
 _autosave-*
 ~*.lck
+
+# Playwright
+test-results/
+playwright-report/
