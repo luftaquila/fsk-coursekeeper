@@ -36,7 +36,7 @@ export function deviceUrlProblem(url) {
   try {
     parsed = new URL(url);
   } catch {
-    return "Enter a full URL, e.g. https://fsk-coursekeeper-rover.your-tailnet.ts.net";
+    return "Enter a full URL.";
   }
   const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
   if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) return "Use an https:// URL.";

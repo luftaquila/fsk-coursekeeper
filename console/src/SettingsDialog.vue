@@ -1,5 +1,6 @@
 <script setup>
 import { computed, ref } from "vue";
+import ConsoleIcon from "fsk-coursekeeper/console/components/ConsoleIcon.vue";
 import { useNotification } from "fsk-coursekeeper/console/notify.mjs";
 import { deviceUrlProblem, saveSettings } from "./settings.mjs";
 
@@ -11,6 +12,13 @@ const props = defineProps({
 const emit = defineEmits(["close"]);
 const { error: notifyError } = useNotification();
 
+// A device's kind is fixed when it is added; the host names follow the device
+// READMEs' examples.
+const KINDS = {
+  rover: { label: "Rover", icon: "rover", example: "https://fsk-coursekeeper-rover.your-tailnet.ts.net" },
+  gps: { label: "GPS unit", icon: "gps", example: "https://fsk-coursekeeper-gps.your-tailnet.ts.net" },
+};
+
 const devices = ref(props.settings.devices.map((device) => ({ ...device })));
 const vworldKey = ref(props.settings.vworldKey);
 const busy = ref(false);
@@ -20,7 +28,7 @@ const problems = computed(() => devices.value.map((device) => deviceUrlProblem(d
 const canSave = computed(() => !busy.value && problems.value.every((problem) => problem == null));
 
 function addDevice(kind) {
-  devices.value.push({ id: crypto.randomUUID(), kind, label: kind === "rover" ? "Rover" : "GPS unit", url: "" });
+  devices.value.push({ id: crypto.randomUUID(), kind, label: KINDS[kind].label, url: "" });
 }
 
 function removeDevice(index) {
@@ -33,7 +41,7 @@ function save() {
     devices: devices.value.map((device) => ({
       id: device.id,
       kind: device.kind,
-      label: device.label.trim() || (device.kind === "rover" ? "Rover" : "GPS unit"),
+      label: device.label.trim() || KINDS[device.kind].label,
       url: device.url.trim().replace(/\/+$/, ""),
     })),
     vworldKey: vworldKey.value.trim(),
@@ -84,14 +92,10 @@ async function importDatabase(event) {
       <h2 id="settings-title">Settings</h2>
 
       <h3>Devices</h3>
-      <p class="hint">Device API addresses on your tailnet, e.g. <code>https://fsk-coursekeeper-rover.your-tailnet.ts.net</code>.</p>
       <div v-for="(device, index) in devices" :key="device.id" class="device-row">
-        <select v-model="device.kind" aria-label="Device type">
-          <option value="rover">Rover</option>
-          <option value="gps">GPS unit</option>
-        </select>
+        <span class="device-kind"><ConsoleIcon :name="KINDS[device.kind].icon" :size="16" />{{ KINDS[device.kind].label }}</span>
         <input v-model="device.label" class="device-label" placeholder="Name" aria-label="Device name" />
-        <input v-model="device.url" class="device-url" placeholder="https://…" aria-label="Device address" />
+        <input v-model="device.url" class="device-url" :placeholder="KINDS[device.kind].example" aria-label="Device address" />
         <button class="btn btn-ghost btn-sm" aria-label="Remove device" @click="removeDevice(index)">×</button>
         <p v-if="device.url && problems[index]" class="device-problem">{{ problems[index] }}</p>
       </div>
@@ -100,15 +104,11 @@ async function importDatabase(event) {
         <button class="btn btn-ghost btn-sm" @click="addDevice('gps')">+ GPS unit</button>
       </div>
 
-      <h3>Map</h3>
-      <label class="field">
-        VWorld API key
-        <input v-model="vworldKey" placeholder="Leave empty to use Google imagery" />
-      </label>
-      <p class="hint">VWorld imagery matches Korean survey coordinates; the key must be registered for this site's domain.</p>
+      <h3 id="vworld-title">Korean VWorld API key</h3>
+      <input v-model="vworldKey" class="wide" placeholder="Leave empty to use Google imagery" aria-labelledby="vworld-title" />
+      <p class="hint below">The key must be registered for this domain.</p>
 
       <h3>Courses</h3>
-      <p class="hint">Courses are stored in this browser. Back them up to move them to another computer.</p>
       <div class="row">
         <button class="btn btn-ghost btn-sm" :disabled="busy || !persistent" @click="exportDatabase">Export backup</button>
         <button class="btn btn-ghost btn-sm" :disabled="busy || !persistent" @click="importInput.click()">Restore backup</button>
@@ -135,7 +135,7 @@ async function importDatabase(event) {
   background: rgba(0, 0, 0, 0.45);
 }
 .settings {
-  width: min(640px, 100%);
+  width: min(760px, 100%);
   max-height: 100%;
   overflow: auto;
   padding: 1.25rem;
@@ -147,17 +147,19 @@ async function importDatabase(event) {
 h2 { margin: 0 0 0.75rem; font-size: 1.15rem; }
 h3 { margin: 1rem 0 0.35rem; font-size: 0.95rem; }
 .hint { margin: 0 0 0.5rem; color: var(--text-secondary); font-size: 0.85rem; }
+.hint.below { margin-top: 0.35rem; }
 .device-row {
   display: grid;
-  grid-template-columns: 7rem 8rem 1fr auto;
+  grid-template-columns: 5.5rem 6.5rem 1fr auto;
   gap: 0.4rem;
   margin-bottom: 0.4rem;
 }
+.device-kind { display: flex; align-items: center; gap: 0.4rem; font-size: 0.9rem; font-weight: 600; color: var(--text-secondary); }
 .device-problem { grid-column: 1 / -1; margin: 0; color: var(--accent-danger); font-size: 0.8rem; }
 .row, .actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
 .actions { justify-content: flex-end; margin-top: 1.25rem; }
-.field { display: flex; flex-direction: column; gap: 0.3rem; font-size: 0.9rem; }
-input, select {
+.wide { display: block; width: 100%; box-sizing: border-box; }
+input {
   min-width: 0;
   padding: 0.4rem 0.5rem;
   border: 1px solid var(--border-color);
@@ -166,7 +168,9 @@ input, select {
   color: var(--text-primary);
 }
 @media (max-width: 560px) {
-  .device-row { grid-template-columns: 1fr 1fr auto; }
-  .device-url { grid-column: 1 / -1; grid-row: 2; }
+  .settings-backdrop { padding-left: 0.75rem; padding-right: 0.75rem; }
+  .settings { padding: 1rem; }
+  .device-row { grid-template-columns: 5.5rem 1fr auto; }
+  .device-url { grid-column: 1 / -1; grid-row: 2; font-size: 0.85rem; }
 }
 </style>
