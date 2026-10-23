@@ -2,12 +2,10 @@ import { ref, onUnmounted } from "vue";
 import L from "leaflet";
 import { haversine } from "../../geo.mjs";
 
-// Ruler / protractor measurement overlays for the course map, extracted from
-// MapView. Owns its own toolMode/result state + the Leaflet overlay layer.
+// Ruler / protractor measurement overlays for the course map. Owns its own
+// toolMode/result state + the Leaflet overlay layer.
 // Deps injected by the view:
 //   getMap()        -> the live Leaflet map (created after setup)
-//   rebuildMarkers()-> re-render cone markers (drag is suspended while measuring)
-//   isCoursesTab()  -> whether the courses tab is active (drag re-enable on exit)
 //   clearOtherModes()-> drop rotate/select/multiselect so measuring is exclusive
 // Taps are snapped to a cone by the caller (nearestCone) before handleMeasureClick.
 
@@ -31,7 +29,7 @@ function fmtDist(m) {
   return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${m.toFixed(2)} m`;
 }
 
-export function useMeasureTools({ getMap, rebuildMarkers, isCoursesTab, clearOtherModes }) {
+export function useMeasureTools({ getMap, clearOtherModes }) {
   const toolMode = ref("none");     // none | ruler | protractor
   const measureResult = ref("");    // distance total / measured angle for the overlay
   let measureLayer = null;          // L.layerGroup holding the active tool's overlays
@@ -46,7 +44,6 @@ export function useMeasureTools({ getMap, rebuildMarkers, isCoursesTab, clearOth
     if (!measureLayer) measureLayer = L.layerGroup();
     measureLayer.addTo(map);
     resetMeasure();
-    rebuildMarkers(); // suspend per-cone drag while a tool is active
   }
 
   function exitToolMode() {
@@ -56,7 +53,6 @@ export function useMeasureTools({ getMap, rebuildMarkers, isCoursesTab, clearOth
     const map = getMap();
     if (measureLayer) { measureLayer.clearLayers(); try { map.removeLayer(measureLayer); } catch {} }
     measureResult.value = "";
-    if (map && isCoursesTab()) rebuildMarkers();
   }
 
   function resetMeasure() {

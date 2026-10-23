@@ -15,7 +15,7 @@ const loadFixture = (name) =>
 
 function pipeline(cones, name, reverse = false) {
   // direction is applied in computeCenterline (single source of truth), exactly
-  // like MapView's exportCourse; buildTrackModel then runs forward.
+  // like the console's exportCourse; buildTrackModel then runs forward.
   const cl = computeCenterline(cones, { step: 1.0, metric: true, reverse });
   const edges = buildRoadEdges(cl);
   const track = buildTrackModel(cl, edges, { name });

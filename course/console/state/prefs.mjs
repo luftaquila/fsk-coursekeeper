@@ -1,6 +1,6 @@
 // Per-browser view preferences of the operator console. Storage can be
 // unavailable (private windows, blocked site data); reads then fall back.
-const PREFIX = "mapview.";
+const PREFIX = "coursekeeper.console.";
 
 export function loadPref(key, fallback, parse = (x) => x) {
   try {

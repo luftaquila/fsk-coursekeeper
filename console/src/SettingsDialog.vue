@@ -131,7 +131,7 @@ async function importDatabase(event) {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 1rem;
+  padding: calc(var(--ck-header-h, 0px) + 1rem) 1rem 1rem;
   background: rgba(0, 0, 0, 0.45);
 }
 .settings {

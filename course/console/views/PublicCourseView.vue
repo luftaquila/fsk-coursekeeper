@@ -38,8 +38,6 @@ const geometry = computed(() => geometries.value[state.selectedId] || { line: nu
 
 const { toolMode, measureResult, enterToolMode, exitToolMode, resetMeasure, handleMeasureClick } = useMeasureTools({
   getMap: () => map,
-  rebuildMarkers: () => {},
-  isCoursesTab: () => false,
   clearOtherModes: () => {},
 });
 

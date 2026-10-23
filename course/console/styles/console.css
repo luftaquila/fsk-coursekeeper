@@ -50,3 +50,198 @@
   .map-fab-panel .side-btn,
   .map-fab-rotate { width: 44px; height: 44px; min-height: 0; }
 }
+
+/* Leaflet markers and overlays of the operator map (drawn outside component scope). */
+.route-marker-host { background: transparent; border: 0; }
+.route-marker-pin {
+  width: 30px; height: 30px; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid #fff; border-radius: 50%;
+  background: #64748b; color: #fff;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.55);
+  font: 700 9px/1 "JetBrains Mono", ui-monospace, monospace;
+}
+.route-marker-pin.has-visits { background: #10b981; }
+.selection-box {
+  position: absolute;
+  border: 2px dashed #38bdf8;
+  background: rgba(56, 189, 248, 0.1);
+  pointer-events: none;
+  z-index: 1000;
+}
+/* Device labels take their marker's colour (a darker teal for the GPS unit, so
+   the white text stays legible). Doubled with Leaflet's own class:
+   leaflet.css may load after this file. */
+.leaflet-tooltip.device-tooltip {
+  background: #a855f7; color: #fff; border: none;
+  font-size: 11px; font-weight: 600; padding: 2px 6px;
+  border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+.leaflet-tooltip-top.device-tooltip::before { border-top-color: #a855f7; }
+.leaflet-tooltip.device-tooltip.receiver { background: #0d9488; }
+.leaflet-tooltip-top.device-tooltip.receiver::before { border-top-color: #0d9488; }
+
+/* Surveyed base-station point markers (L.divIcon, outside scoped styles). Magenta
+   diamond — deliberately unlike the cyan right-side cone the operator flagged as
+   too similar; amber ring = active base, sky-blue ring = selected in the list. */
+.survey-marker {
+  width: 14px; height: 14px; box-sizing: border-box; cursor: pointer;
+  background: #ec4899; border: 2px solid #fff; transform: rotate(45deg);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.5);
+}
+.survey-marker.is-base {
+  width: 18px; height: 18px;
+  box-shadow: 0 0 0 3px rgba(245,158,11,0.9), 0 1px 4px rgba(0,0,0,0.5);
+}
+.survey-marker.selected {
+  box-shadow: 0 0 0 3px #38bdf8, 0 1px 4px rgba(0,0,0,0.5);
+}
+.leaflet-tooltip.survey-tooltip {
+  background: #be185d; color: #fff; border: none;
+  font-size: 11px; font-weight: 600; padding: 2px 6px;
+  border-radius: 4px; box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+.leaflet-tooltip-top.survey-tooltip::before { border-top-color: #be185d; }
+
+/* Rotation handle/pivot + measurement overlays are drawn into Leaflet's DOM via
+   L.divIcon, so they live outside the component's scoped styles. */
+.rotate-pivot {
+  width: 14px; height: 14px; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid #38bdf8; background: rgba(56, 189, 248, 0.35);
+}
+.rotate-handle {
+  width: 32px; height: 32px; border-radius: 50%; box-sizing: border-box;
+  border: 2px solid #38bdf8; background: #0b1220; color: #38bdf8;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 17px; line-height: 1; cursor: grab;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.45);
+}
+.rotate-handle:active { cursor: grabbing; }
+
+/* In select mode the map is pinned; stop the browser from scrolling/zooming the
+   page so a touch drag draws a selection box instead. */
+.select-mode-active { touch-action: none !important; }
+.coord-popover-body {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 0.8rem;
+  white-space: nowrap;
+}
+
+/* ── Operator console panels ─────────────────────────
+   Host-independent primitives: they use only the theme variables every host
+   defines (--bg-*, --text-*, --accent-*, --border-color, --shadow-*). */
+
+/* The console header's height. Full-screen overlays start below it, so the
+   header's E-stop, which stays above them, never covers their content. */
+:root { --ck-header-h: 56px; }
+@media (max-width: 768px) { :root { --ck-header-h: 52px; } }
+
+/* vue-sonner spans the full width on phones (its own 600px breakpoint); keep
+   those toasts short so they hide less of the map. */
+@media (max-width: 600px) {
+  [data-sonner-toast][data-styled="true"].ck-toast { padding: 9px 12px; gap: 8px; }
+}
+.ck-section { padding: 0.9rem 1rem; border-bottom: 1px solid var(--border-color); }
+.ck-section:last-child { border-bottom: none; }
+.ck-section-head { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin-bottom: 0.6rem; }
+.ck-section-title { font-size: 0.8rem; font-weight: 700; letter-spacing: 0.02em; color: var(--text-secondary); text-transform: uppercase; }
+.ck-hint { font-size: 0.78rem; color: var(--text-secondary); line-height: 1.45; }
+.ck-empty { padding: 1.25rem 0.5rem; text-align: center; font-size: 0.85rem; color: var(--text-secondary); line-height: 1.5; }
+.ck-empty strong { display: block; color: var(--text-primary); margin-bottom: 0.25rem; }
+.ck-row { display: flex; align-items: center; gap: 0.5rem; }
+.ck-row.wrap { flex-wrap: wrap; }
+.ck-grow { flex: 1; min-width: 0; }
+.ck-stack { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.ck-btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 0.4rem;
+  min-height: 34px; padding: 0 0.8rem;
+  border: 1px solid var(--border-color); border-radius: 8px;
+  background: var(--bg-secondary); color: var(--text-primary);
+  font: inherit; font-size: 0.85rem; font-weight: 600; white-space: nowrap;
+  cursor: pointer; transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.ck-btn:hover:not(:disabled) { background: var(--bg-hover); }
+.ck-btn:disabled { opacity: 0.45; cursor: default; }
+.ck-btn.primary { background: var(--accent-primary); border-color: var(--accent-primary); color: #fff; }
+.ck-btn.primary:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-primary) 88%, #000); }
+.ck-btn.danger { color: var(--accent-danger, #ef4444); border-color: color-mix(in srgb, var(--accent-danger, #ef4444) 40%, var(--border-color)); }
+.ck-btn.danger:hover:not(:disabled) { background: color-mix(in srgb, var(--accent-danger, #ef4444) 10%, var(--bg-secondary)); }
+.ck-btn.danger-solid { background: var(--accent-danger, #ef4444); border-color: var(--accent-danger, #ef4444); color: #fff; }
+.ck-btn.quiet { border-color: transparent; background: transparent; color: var(--text-secondary); }
+.ck-btn.quiet:hover:not(:disabled) { background: var(--bg-hover); color: var(--text-primary); }
+.ck-btn.icon { width: 34px; padding: 0; }
+.ck-btn.block { width: 100%; }
+.ck-btn.lg { min-height: 44px; font-size: 0.9rem; }
+.ck-btn.active { color: var(--accent-primary); border-color: color-mix(in srgb, var(--accent-primary) 50%, var(--border-color)); background: color-mix(in srgb, var(--accent-primary) 10%, var(--bg-secondary)); }
+
+/* Square icon buttons in the console header; hosts use it for their own
+   header actions (the status-actions slot) so every button matches. */
+.ck-header-btn {
+  flex: none; width: 40px; height: 40px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border-color); border-radius: 10px;
+  background: var(--bg-secondary); color: var(--text-secondary); cursor: pointer;
+}
+.ck-header-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.ck-input, .ck-select {
+  min-width: 0; min-height: 34px; padding: 0 0.6rem;
+  border: 1px solid var(--border-color); border-radius: 8px;
+  background: var(--bg-input, var(--bg-secondary)); color: var(--text-primary);
+  font: inherit; font-size: 0.85rem;
+}
+.ck-input:focus, .ck-select:focus { outline: 2px solid color-mix(in srgb, var(--accent-primary) 40%, transparent); border-color: var(--accent-primary); }
+.ck-field { display: flex; flex-direction: column; gap: 0.25rem; font-size: 0.78rem; color: var(--text-secondary); }
+.ck-field > .ck-input, .ck-field > .ck-select { color: var(--text-primary); }
+
+.ck-seg { display: inline-flex; padding: 2px; gap: 2px; border-radius: 9px; background: var(--bg-hover); }
+.ck-seg-btn {
+  min-height: 28px; padding: 0 0.7rem; border: none; border-radius: 7px;
+  background: transparent; color: var(--text-secondary);
+  font: inherit; font-size: 0.8rem; font-weight: 600; cursor: pointer; white-space: nowrap;
+}
+.ck-seg-btn.active { background: var(--bg-secondary); color: var(--text-primary); box-shadow: var(--shadow-card); }
+.ck-seg-btn:disabled { opacity: 0.45; cursor: default; }
+
+.ck-rows {
+  display: grid; grid-template-columns: max-content 1fr; column-gap: 0.85rem; row-gap: 0.2rem;
+  font-family: "JetBrains Mono", ui-monospace, monospace; font-size: 0.8rem; align-items: baseline;
+}
+.ck-rows .k { color: var(--text-secondary); font-weight: 600; white-space: nowrap; }
+.ck-rows .v { color: var(--text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.ck-tone-ok { color: #16a34a !important; }
+.ck-tone-warn { color: #d97706 !important; }
+.ck-tone-bad { color: #dc2626 !important; }
+.ck-tone-neutral { color: var(--text-secondary) !important; }
+[data-theme="dark"] .ck-tone-ok { color: #4ade80 !important; }
+[data-theme="dark"] .ck-tone-warn { color: #fbbf24 !important; }
+[data-theme="dark"] .ck-tone-bad { color: #f87171 !important; }
+
+.ck-badge {
+  display: inline-flex; align-items: center; gap: 0.3rem;
+  padding: 0.05rem 0.5rem; border-radius: 999px;
+  font-size: 0.72rem; font-weight: 700; white-space: nowrap;
+  background: var(--bg-hover); color: var(--text-secondary);
+}
+.ck-badge.ok { background: color-mix(in srgb, #22c55e 16%, transparent); color: #15803d; }
+.ck-badge.warn { background: color-mix(in srgb, #f59e0b 18%, transparent); color: #b45309; }
+.ck-badge.bad { background: color-mix(in srgb, #ef4444 16%, transparent); color: #b91c1c; }
+.ck-badge.info { background: color-mix(in srgb, var(--accent-primary) 14%, transparent); color: var(--accent-primary); }
+[data-theme="dark"] .ck-badge.ok { color: #4ade80; }
+[data-theme="dark"] .ck-badge.warn { color: #fbbf24; }
+[data-theme="dark"] .ck-badge.bad { color: #f87171; }
+
+.ck-dot { width: 8px; height: 8px; border-radius: 50%; flex: none; background: var(--text-tertiary, #9196a1); }
+.ck-dot.ok { background: #22c55e; }
+.ck-dot.warn { background: #f59e0b; }
+.ck-dot.bad { background: #ef4444; }
+.ck-dot.neutral { background: var(--text-tertiary, #9196a1); }
+
+.ck-side { font-weight: 700; }
+.ck-side.left { color: #d97706; }
+.ck-side.center { color: #dc2626; }
+.ck-side.right { color: #0891b2; }
+[data-theme="dark"] .ck-side.left { color: #fbbf24; }
+[data-theme="dark"] .ck-side.center { color: #f87171; }
+[data-theme="dark"] .ck-side.right { color: #22d3ee; }

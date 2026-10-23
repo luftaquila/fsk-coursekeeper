@@ -1,6 +1,7 @@
 <script setup>
 import { ref } from "vue";
 import CourseConsole from "fsk-coursekeeper/console/CourseConsole.vue";
+import ConsoleIcon from "fsk-coursekeeper/console/components/ConsoleIcon.vue";
 import Toaster from "fsk-coursekeeper/console/Toaster.vue";
 import SettingsDialog from "./SettingsDialog.vue";
 
@@ -22,7 +23,7 @@ const showSettings = ref(false);
     <main class="main-fill">
       <CourseConsole>
         <template #status-actions>
-          <button class="settings-btn" title="Settings" aria-label="Settings" @click="showSettings = true">⚙︎</button>
+          <button class="ck-header-btn" title="Settings" aria-label="Settings" @click="showSettings = true"><ConsoleIcon name="settings" /></button>
         </template>
       </CourseConsole>
     </main>
@@ -51,16 +52,5 @@ const showSettings = ref(false);
   font-size: 0.85rem;
   font-weight: 600;
   text-align: center;
-}
-.settings-btn {
-  flex: none;
-  width: 34px;
-  height: 34px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-size: 1.05rem;
-  cursor: pointer;
 }
 </style>

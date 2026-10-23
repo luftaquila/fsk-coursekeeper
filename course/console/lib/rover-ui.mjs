@@ -1,6 +1,7 @@
-// Pure, reactivity-free rover status-strip presentation helpers, extracted from
-// MapView.vue. No Vue refs and no side effects — each function takes a plain
-// rover-status snapshot object, so these are safe to unit-test and reuse.
+// Pure, reactivity-free rover status presentation helpers for the header
+// badges, the device drawer and the Operate panel. No Vue refs and no side
+// effects — each function takes a plain rover-status snapshot object, so these
+// are safe to unit-test and reuse.
 
 export const SPRAY_OUTCOME_SYMBOL = { success: "✓", cancelled: "⚠", timeout: "✕" };
 export const SPRAY_OUTCOME_COLOR = { success: "#22c55e", cancelled: "#f59e0b", timeout: "#ef4444" };
@@ -17,21 +18,21 @@ export const BATTERY_CRIT_PERCENT = 20;
 // Rover nav_state values that mean a mission is actively being driven.
 export const ACTIVE_NAV_STATES = new Set(["CALIBRATING", "NAVIGATING", "SETTLING", "SPRAYING", "CAL_ANTENNA", "CAL_WHEELS"]);
 
-// Fix-status tone. RTK is ok/warn, plain 3D is warn (no corrections),
+// Fix-status tone and badge label. RTK is ok/warn, plain 3D is warn (no corrections),
 // 2D / time-only / no-fix are all bad. Dead-reckoning variants are folded
 // into no_fix at the rover, so they don't appear here.
 export const FIX_STATUS_META = {
-  rtk_fixed: { tone: "ok" },
-  rtk_float: { tone: "warn" },
-  "3d_fix": { tone: "warn" },
-  "2d_fix": { tone: "bad" },
-  time_only: { tone: "bad" },
-  no_fix: { tone: "bad" },
+  rtk_fixed: { tone: "ok", label: "RTK fixed" },
+  rtk_float: { tone: "warn", label: "RTK float" },
+  "3d_fix": { tone: "warn", label: "3D fix" },
+  "2d_fix": { tone: "bad", label: "2D fix" },
+  time_only: { tone: "bad", label: "Time only" },
+  no_fix: { tone: "bad", label: "No fix" },
 };
 
 // MCU status-flag bits (rover/mcu T-frame `flags`, see rover README).
 // The MCU status LED encodes these by colour (red=e-stop, magenta=undervolt,
-// yellow=heartbeat/batt-warn, orange=nav-GPS-lost); the chip only said
+// yellow=heartbeat/batt-warn, orange=nav-GPS-lost); the nav state only says
 // "ERROR", so we decode them into a plain-English cause list.
 export const MCU_FLAG = {
   ESTOP: 0x01,        // combined sw+hw E-stop latch

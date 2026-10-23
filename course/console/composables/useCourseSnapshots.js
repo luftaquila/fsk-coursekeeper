@@ -1,7 +1,6 @@
 import { ref } from "vue";
 
-// Course cone-set snapshots (create / list / restore / delete), extracted from
-// MapView. Restore relies on the server's `cones` SSE broadcast to refresh the
+// Course cone-set snapshots (create / list / restore / delete). Restore relies on the server's `cones` SSE broadcast to refresh the
 // map, so this only orchestrates the API + modal state. Deps:
 //   activeCourseId  the course whose snapshots we manage (ref)
 //   notifyError     toast on failure

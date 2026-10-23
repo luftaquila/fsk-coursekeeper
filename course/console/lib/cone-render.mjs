@@ -1,9 +1,9 @@
-// Cone rendering primitives extracted from MapView.vue: the side→colour map, the
-// DOM cone-icon HTML, the Leaflet divIcon factories, the zoom→size curve, and the
-// label-painting canvas renderer. All pure/stateless (no Vue refs) — they take
-// plain args and return Leaflet objects/strings, so they're reusable and testable.
-// The ref-coupled `coneCircle` (reads the current selection) stays in MapView and
-// imports these.
+// Cone rendering primitives: the side→colour map, the DOM cone-icon HTML, the
+// Leaflet divIcon factories, the zoom→size curve, and the label-painting canvas
+// renderer. All pure/stateless (no Vue refs) — they take plain args and return
+// Leaflet objects/strings, so they're reusable and testable.
+// The ref-coupled `coneCircle` (reads the current selection) lives in
+// map/cone-layer.mjs and imports these.
 import L from "leaflet";
 
 export const SIDE_COLORS = { left: "#f59e0b", right: "#06b6d4", center: "#ef4444" };
@@ -33,9 +33,9 @@ export function multiSelectIcon(side, num) {
 }
 
 // Canvas renderer that also paints each circleMarker's `label` (the cone's
-// side index) in the centre — so non-editing tabs keep the numbers while still
-// drawing hundreds of cones in a single canvas pass instead of hundreds of DOM
-// nodes. Overrides L.Canvas._updateCircle (Leaflet 1.9), drawing the number
+// side index) in the centre — so the map keeps the numbers outside the Move
+// tool while still drawing hundreds of cones in a single canvas pass instead of
+// hundreds of DOM nodes. Overrides L.Canvas._updateCircle (Leaflet 1.9), drawing the number
 // right after the base circle while the layer's canvas point is current.
 const CONE_MIN_R = 2.5, CONE_MAX_R = 9; // dot radius (px), scaled by zoom
 // A Leaflet circleMarker is a fixed pixel size, so when you zoom out the dots
@@ -45,16 +45,16 @@ const CONE_MIN_R = 2.5, CONE_MAX_R = 9; // dot radius (px), scaled by zoom
 export function coneRadiusForZoom(zoom) {
   return Math.max(CONE_MIN_R, Math.min(CONE_MAX_R, CONE_MAX_R * Math.pow(2, zoom - 20)));
 }
-// DOM cone-icon diameter (courses tab) — same zoom curve as the canvas dots.
+// DOM cone-icon diameter (Move tool) — same zoom curve as the canvas dots.
 export function coneDiameterForZoom(zoom) {
   return 2 * coneRadiusForZoom(zoom);
 }
-// Draw each cone pixel-identical to the courses-tab DOM marker (coneDot): a
+// Draw each cone pixel-identical to the Move tool's DOM marker (coneDot): a
 // coloured disc of radius r, a white ring of thickness max(1px, diameter*0.1)
 // sitting OUTSIDE it (the DOM uses a content-box border), and a centred number
 // at font = 0.5*diameter in the app font. All on one shared canvas so the
-// non-editing tabs stay smooth with hundreds of cones.
-// The courses-tab DOM cone number inherits Leaflet's `.leaflet-container` font,
+// map stays smooth with hundreds of cones.
+// The DOM cone number inherits Leaflet's `.leaflet-container` font,
 // not the app body font — so the canvas labels must use the SAME stack to look
 // identical. (Verified at runtime: the DOM cone computes to this family, and the
 // canvas cannot render the app's Noto Sans KR web font, so reusing that would
@@ -71,7 +71,7 @@ export const LabeledConeCanvas = L.Canvas.extend({
     if (!this._drawing || layer._empty()) return;
     const p = layer._point, ctx = this._ctx;
     // Ring thickness/colour mirror the DOM cone: white at ratio 0.1 by default,
-    // but a selected/multi-selected cone on the locked courses tab gets the same
+    // but a selected/multi-selected cone outside the Move tool gets the same
     // amber/sky highlight ring the DOM markers use (set via coneCircle options).
     const ratio = layer.options.ringRatio ?? 0.1;
     const border = Math.max(1, 2 * r * ratio); // = DOM border: max(1px, --cone-px*ratio)

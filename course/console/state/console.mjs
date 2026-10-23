@@ -3,10 +3,12 @@ import { useNotification } from "../notify.mjs";
 import { createClock } from "./clock.mjs";
 import { createCourseStore } from "./course-store.mjs";
 import { createEditHistory } from "./edit-history.mjs";
+import { createEditorStore } from "./editor-store.mjs";
 import { createGpsStore } from "./gps-store.mjs";
 import { createMissionStore } from "./mission-store.mjs";
 import { createReviewStore } from "./review-store.mjs";
 import { createRoverStore } from "./rover-store.mjs";
+import { createStatusRows } from "./status-rows.mjs";
 
 const CONSOLE_STATE_KEY = Symbol("course-console-state");
 
@@ -25,11 +27,15 @@ export function createConsoleState(host) {
   const gps = createGpsStore({ host, notify, clock, rover, access });
   const mission = createMissionStore({ notify, course, rover });
   const review = createReviewStore({ notify, rover });
+  const editor = createEditorStore({ access });
+  const status = createStatusRows({ host, clock, rover, gps, mission });
+  // Filled by the map once it exists: pan / focus actions the panels call.
+  const mapActions = {};
 
-  // True while any event stream is down, so the console can say so instead of
-  // silently freezing. Events sent while a link is down are lost; each link
-  // resynchronizes once it is back.
-  const reconnecting = ref(false);
+  // The links ("course", "rover", "gps") whose event stream is down, so the
+  // console can say so instead of silently freezing. Events sent while a link
+  // is down are lost; each link resynchronizes once it is back.
+  const droppedLinks = ref([]);
   let streams = [];
 
   function connect() {
@@ -38,15 +44,13 @@ export function createConsoleState(host) {
     const gpsEvents = host.devices.transport("gps")?.events() ?? null;
     streams = [courseEvents, roverEvents, gpsEvents].filter(Boolean);
 
-    const droppedLinks = new Set();
     function watchLink(stream, name, resync) {
       stream.addEventListener("error", () => {
-        droppedLinks.add(name);
-        reconnecting.value = true;
+        if (!droppedLinks.value.includes(name)) droppedLinks.value = [...droppedLinks.value, name];
       });
       stream.addEventListener("open", () => {
-        if (!droppedLinks.delete(name)) return;
-        if (droppedLinks.size === 0) reconnecting.value = false;
+        if (!droppedLinks.value.includes(name)) return;
+        droppedLinks.value = droppedLinks.value.filter((link) => link !== name);
         resync();
       });
     }
@@ -65,10 +69,10 @@ export function createConsoleState(host) {
   function disconnect() {
     for (const stream of streams) stream.close();
     streams = [];
-    reconnecting.value = false;
+    droppedLinks.value = [];
   }
 
-  return { host, notify, clock, access, edits, course, rover, gps, mission, review, reconnecting, connect, disconnect };
+  return { host, notify, clock, access, edits, course, rover, gps, mission, review, editor, status, mapActions, droppedLinks, connect, disconnect };
 }
 
 export function provideConsoleState(state) {

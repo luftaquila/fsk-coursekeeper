@@ -15,12 +15,12 @@ export async function openConsole(page, { rover = false, gps = false } = {}) {
   await page.addInitScript(([key, value]) => localStorage.setItem(key, value),
     [SETTINGS_KEY, JSON.stringify({ devices, vworldKey: "" })]);
   await page.goto("/");
-  await expect(page.locator("#map")).toBeVisible();
+  await expect(page.getByTestId("map")).toBeVisible();
 }
 
 // A point on the map, offset in pixels from the centre of the map element.
 export async function mapPoint(page, dx = 0, dy = 0) {
-  const box = await page.locator("#map").boundingBox();
+  const box = await page.getByTestId("map").boundingBox();
   return { x: box.x + box.width / 2 + dx, y: box.y + box.height / 2 + dy };
 }
 
@@ -29,27 +29,52 @@ export async function clickMap(page, dx = 0, dy = 0) {
   await page.mouse.click(x, y);
 }
 
+export async function dragMap(page, from, to) {
+  const a = await mapPoint(page, ...from);
+  const b = await mapPoint(page, ...to);
+  await page.mouse.move(a.x, a.y);
+  await page.mouse.down();
+  await page.mouse.move(b.x, b.y, { steps: 5 });
+  await page.mouse.up();
+}
+
+// Creates a course from the course switcher in the header.
 export async function createCourse(page, name) {
-  const input = page.locator('input[placeholder="New course name"]');
+  const switcher = page.getByTestId("course-switcher");
+  await switcher.getByRole("button", { expanded: false }).click();
+  const input = switcher.getByRole("textbox", { name: "New course name" });
   await input.fill(name);
   await input.press("Enter");
-  await expect(page.locator(".course-item.active")).toContainText(name);
+  await expect(switcher.getByRole("button").first()).toContainText(name);
 }
 
-export const coneRows = (page) => page.locator(".cone-item");
+export const coneRows = (page) => page.getByTestId("cone-row");
 
-export async function unlockEditing(page) {
-  const lock = page.locator(".fab-lock");
-  if (await lock.evaluate((el) => el.classList.contains("locked"))) await lock.click();
-  await expect(lock).not.toHaveClass(/locked/);
+export const toolButton = (page, label) => page.getByTestId("palette").getByRole("button", { name: label, exact: true });
+
+export async function selectTool(page, label) {
+  const button = toolButton(page, label);
+  if (await button.getAttribute("aria-pressed") !== "true") await button.click();
+  await expect(button).toHaveAttribute("aria-pressed", "true");
 }
 
+// Adds cones with the Add tool, which stays active afterwards.
 export async function addCones(page, points) {
+  await selectTool(page, "Add cones");
   const before = await coneRows(page).count();
   for (const [dx, dy] of points) await clickMap(page, dx, dy);
   await expect(coneRows(page)).toHaveCount(before + points.length);
 }
 
-export async function openTab(page, title) {
-  await page.locator(`.rail-btn[title="${title}"]`).click();
+export async function setMode(page, mode) {
+  const tab = page.getByTestId(`mode-${mode}`);
+  await tab.click();
+  await expect(tab).toHaveAttribute("aria-pressed", "true");
+}
+
+export async function openDrawer(page, kind) {
+  await page.getByTestId(`device-${kind}`).click();
+  const drawer = page.getByTestId("device-drawer");
+  await expect(drawer).toBeVisible();
+  return drawer;
 }

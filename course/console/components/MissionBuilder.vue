@@ -384,7 +384,7 @@ function centerMapOnCurrent() {
 async function initBuilderMap() {
   if (!mapElement.value || builderMap) return;
   const expectedElement = mapElement.value;
-  // MapView normally loaded the plugin already. Keep the conditional fallback
+  // The console map normally loaded the plugin already. Keep the conditional fallback
   // for isolated component mounts without re-running plugin initialization on
   // every popup open.
   if (typeof L.Map.prototype.setBearing !== "function") {
@@ -643,13 +643,13 @@ function drop(index) {
   z-index: 3000;
   display: grid;
   place-items: center;
-  padding: .5rem;
+  padding: calc(var(--ck-header-h, 0px) + .5rem) .5rem .5rem;
   background: rgba(2, 6, 23, .78);
 }
 
 .mission-builder {
   width: min(2200px, calc(100vw - 1rem));
-  height: min(1200px, calc(100dvh - 1rem));
+  height: min(1200px, calc(100dvh - var(--ck-header-h, 0px) - 1rem));
   min-width: 0;
   display: flex;
   flex-direction: column;
@@ -1137,10 +1137,10 @@ function drop(index) {
 }
 
 @media (max-width: 760px) {
-  .mission-builder-backdrop { padding: 0; }
+  .mission-builder-backdrop { padding: var(--ck-header-h, 0px) 0 0; }
   .mission-builder {
     width: 100vw;
-    height: 100dvh;
+    height: calc(100dvh - var(--ck-header-h, 0px));
     border: 0;
     border-radius: 0;
   }

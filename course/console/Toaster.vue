@@ -24,5 +24,10 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <Toaster rich-colors :theme="theme" position="bottom-right" :duration="3500" />
+  <!-- Top right, under the console header: clear of the header's E-stop and of
+       the map's own controls. Phones get a slimmer toast (console.css). -->
+  <Toaster
+    rich-colors :theme="theme" position="top-right" :offset="{ top: 68, right: 16 }" :mobile-offset="{ top: 60 }" :duration="3500"
+    :toast-options="{ class: 'ck-toast' }"
+  />
 </template>

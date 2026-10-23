@@ -1,4 +1,4 @@
-// Geographic helpers used by both frontend (MapView) and backend (course).
+// Geographic helpers used by both frontend (the console) and backend (course).
 // Keep this file dependency-free so it can be imported from browser and Node.
 
 const R_EARTH = 6371e3; // meters

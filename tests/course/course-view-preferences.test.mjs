@@ -9,12 +9,12 @@ const memoryStorage = () => {
 
 test("public course preferences survive re-entry independently of operator settings", () => {
   const storage = memoryStorage();
-  storage.setItem("mapview.mapBearing", "90");
+  storage.setItem("coursekeeper.console.mapBearing", "90");
   assert.deepEqual(readPublicCoursePreferences(storage), { selectedId: null, overlays: {}, showCenterline: true, mapBearing: 0 });
   const saved = { selectedId: 42, overlays: { 7: true }, showCenterline: false, mapBearing: 270 };
   for (const [key, value] of Object.entries(saved)) savePublicCoursePreference(storage, key, value);
   assert.deepEqual(readPublicCoursePreferences(storage), saved);
-  assert.equal(storage.getItem("mapview.mapBearing"), "90");
+  assert.equal(storage.getItem("coursekeeper.console.mapBearing"), "90");
 });
 
 test("corrupt or unavailable preferences use safe defaults", () => {
