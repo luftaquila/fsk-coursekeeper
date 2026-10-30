@@ -72,9 +72,9 @@ export async function setMode(page, mode) {
   await expect(tab).toHaveAttribute("aria-pressed", "true");
 }
 
-export async function openDrawer(page, kind) {
+export async function openDevicePanel(page, kind) {
   await page.getByTestId(`device-${kind}`).click();
-  const drawer = page.getByTestId("device-drawer");
-  await expect(drawer).toBeVisible();
-  return drawer;
+  const panel = page.getByTestId("device-panel");
+  await expect(panel).toBeVisible();
+  return panel;
 }

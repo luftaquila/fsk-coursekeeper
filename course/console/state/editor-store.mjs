@@ -94,16 +94,21 @@ export function createEditorStore({ access }) {
   const isMobile = ref(false);
   // Pixels of the map hidden under the mobile bottom sheet (0 on desktop).
   const mapCover = ref(0);
-  // The device drawer: null, "rover" or "gps".
-  const drawer = ref(null);
+  // The device panel shown in place of the mode's panel: null, "rover" or "gps".
+  const devicePanel = ref(null);
+  // Picking a mode, even the current one, brings its panel back.
+  function selectMode(key) {
+    mode.value = key;
+    devicePanel.value = null;
+  }
   const reviewView = ref(loadPref("reviewView", "missions") === "logs" ? "logs" : "missions");
   watch(reviewView, (v) => savePref("reviewView", v));
   const selectedSurveyPointId = ref(null);
 
   return {
-    mode, modes, tool, side, setTool,
+    mode, modes, selectMode, tool, side, setTool,
     selectedConeId, multiSelectedIds, rotating, hasSelection, clearSelection, selectCone, toggleInSelection,
     showCenterline, mapBearing, followRover, followReceiver,
-    inspectorWidth, isMobile, mapCover, drawer, reviewView, selectedSurveyPointId,
+    inspectorWidth, isMobile, mapCover, devicePanel, reviewView, selectedSurveyPointId,
   };
 }

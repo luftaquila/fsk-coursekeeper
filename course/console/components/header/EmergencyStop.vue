@@ -2,8 +2,8 @@
 import { useConsoleState } from "../../state/console.mjs";
 import ConsoleIcon from "../ConsoleIcon.vue";
 
-// The rover E-stop, reachable from every screen: it sits above every dialog,
-// drawer and toast. It turns into the release button while the rover is
+// The rover E-stop, reachable from every screen: it sits above every dialog
+// and toast. It turns into the release button while the rover is
 // latched in EMERGENCY_STOP. A phone header has room only for short labels.
 const { rover, editor } = useConsoleState();
 const { roverStatus, stopping, inEmergency, missionActive, emergencyStop } = rover;

@@ -9,7 +9,7 @@ const props = defineProps({
   storage: { type: Object, required: true },
   persistent: { type: Boolean, required: true },
 });
-const emit = defineEmits(["close"]);
+const emit = defineEmits(["close", "saved"]);
 const { error: notifyError } = useNotification();
 
 // A device's kind is fixed when it is added; the host names follow the
@@ -35,9 +35,9 @@ function removeDevice(index) {
   devices.value.splice(index, 1);
 }
 
-// Device connections and the basemap are set up when the console starts.
+// The app applies the saved settings by starting the console again.
 function save() {
-  const saved = saveSettings({
+  const next = {
     devices: devices.value.map((device) => ({
       id: device.id,
       kind: device.kind,
@@ -45,12 +45,12 @@ function save() {
       host: deviceHostOf(device.host),
     })),
     vworldKey: vworldKey.value.trim(),
-  });
-  if (!saved) {
+  };
+  if (!saveSettings(next)) {
     notifyError("This browser blocked saving settings.");
     return;
   }
-  window.location.reload();
+  emit("saved", next);
 }
 
 async function exportDatabase() {
@@ -117,7 +117,7 @@ async function importDatabase(event) {
 
       <div class="actions">
         <button class="btn btn-ghost" @click="emit('close')">Cancel</button>
-        <button class="btn btn-primary" :disabled="!canSave" @click="save">Save and reload</button>
+        <button class="btn btn-primary" :disabled="!canSave" @click="save">Save</button>
       </div>
     </section>
   </div>

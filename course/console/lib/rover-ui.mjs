@@ -1,5 +1,5 @@
 // Pure, reactivity-free rover status presentation helpers for the header
-// badges, the device drawer and the Operate panel. No Vue refs and no side
+// badges, the device panel and the Operate panel. No Vue refs and no side
 // effects — each function takes a plain rover-status snapshot object, so these
 // are safe to unit-test and reuse.
 

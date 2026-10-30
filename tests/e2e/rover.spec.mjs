@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { addCones, clickMap, coneRows, createCourse, openConsole, openDrawer, setMode } from "./console.mjs";
+import { addCones, clickMap, coneRows, createCourse, openConsole, openDevicePanel, setMode } from "./console.mjs";
 
 const estop = (page) => page.getByTestId("estop");
 
@@ -29,8 +29,8 @@ test("the E-stop latches and releases", async ({ page }) => {
 });
 
 test("the E-stop stays clickable over an open dialog and its toast", async ({ page }) => {
-  const drawer = await openDrawer(page, "rover");
-  await drawer.getByRole("button", { name: "Calibrate voltage" }).click();
+  const panel = await openDevicePanel(page, "rover");
+  await panel.getByRole("button", { name: "Calibrate voltage" }).click();
   const dialog = page.getByRole("dialog", { name: "Battery voltage calibration" });
   await dialog.getByRole("spinbutton").fill("5");
   await dialog.getByRole("button", { name: "Save" }).click();

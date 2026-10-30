@@ -4,13 +4,13 @@ import { FIX_STATUS_META } from "../../lib/rover-ui.mjs";
 import { useConsoleState } from "../../state/console.mjs";
 import ConsoleIcon from "../ConsoleIcon.vue";
 
-// One device's state at a glance; opens its panel in the device drawer.
+// One device's state at a glance; opens its device panel in the inspector.
 const props = defineProps({
   kind: { type: String, required: true }, // "rover" | "gps"
   compact: { type: Boolean, default: false },
 });
 
-const { rover, gps, status, editor } = useConsoleState();
+const { host, rover, gps, status, editor } = useConsoleState();
 
 function fixLabel(fixStatus) {
   if (!fixStatus) return "No GPS";
@@ -20,6 +20,7 @@ function fixLabel(fixStatus) {
 const badge = computed(() => {
   if (props.kind === "rover") {
     const s = rover.roverStatus.value;
+    if (!host.devices.selected("rover")) return { label: "Rover", detail: "Not set up", tone: "neutral" };
     if (!s.connected) return { label: "Rover", detail: "Offline", tone: "bad" };
     if (s.nav_state === "EMERGENCY_STOP") return { label: "Rover", detail: "E-stop", tone: "bad" };
     const progress = status.missionProgress.value;
@@ -43,9 +44,9 @@ const badge = computed(() => {
   return { label: "GPS unit", detail: fixLabel(r.fix_status), tone: fixRow?.[2] || "bad" };
 });
 
-const pressed = computed(() => editor.drawer.value === props.kind);
+const pressed = computed(() => editor.devicePanel.value === props.kind);
 function toggle() {
-  editor.drawer.value = pressed.value ? null : props.kind;
+  editor.devicePanel.value = pressed.value ? null : props.kind;
 }
 </script>
 

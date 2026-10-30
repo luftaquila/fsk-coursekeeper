@@ -120,7 +120,7 @@ function hideLive() {
 }
 
 function renderSurveyPoints() {
-  devices.renderSurveyPoints(mode.value === "operate" || editor.drawer.value === "gps");
+  devices.renderSurveyPoints(mode.value === "operate" || editor.devicePanel.value === "gps");
 }
 
 /* ── Map setup ────────────────────────────────────── */
@@ -382,7 +382,7 @@ watch(rover.livePosition, (p) => {
   if (editor.followRover.value && p) devices.scheduleFollow(p.lat, p.lng);
 });
 watch(gps.receiver, () => devices.syncReceiver());
-watch([gps.surveyedPoints, gps.gpsConfig, editor.selectedSurveyPointId, editor.drawer], renderSurveyPoints);
+watch([gps.surveyedPoints, gps.gpsConfig, editor.selectedSurveyPointId, editor.devicePanel], renderSurveyPoints);
 
 function centerOnRover() {
   const lp = rover.roverStatus.value.last_position;

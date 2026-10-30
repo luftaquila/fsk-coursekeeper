@@ -15,7 +15,7 @@ Course design and cone layout system for Formula Student Korea dynamic events.
 ### 1. Prepare
 
 1. Open the [web console](https://luftaquila.github.io/fsk-coursekeeper/).
-2. In `Settings`, add each device with `+ Rover` or `+ GPS unit` and its address, then click `Save and reload`.
+2. In `Settings`, add each device with `+ Rover` or `+ GPS unit` and its address, then click `Save`.
 3. Click the `Rover` badge in the header and save an NGII account ID under `Rover NGII login`.
    * Save one for the GPS unit under `GPS unit` → `NGII login`.
 4. To use the GPS unit as the rover's base station instead of the NGII network:

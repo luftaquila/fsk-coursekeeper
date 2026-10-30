@@ -9,8 +9,9 @@ import EmergencyStop from "./EmergencyStop.vue";
 const { host, access, editor, droppedLinks, notify } = useConsoleState();
 const { mode, modes, isMobile } = editor;
 
-// A device badge appears once the host lists that device for this operator.
-const showRover = computed(() => access.canOperateRover.value && host.devices.selected("rover") != null);
+// The rover badge is always there for an operator; the GPS unit's appears once
+// the host lists one.
+const showRover = computed(() => access.canOperateRover.value);
 const showGps = computed(() => access.canOperateRover.value && host.devices.selected("gps") != null);
 const LINK_NAMES = { course: "courses", rover: "rover", gps: "GPS unit" };
 const reconnecting = computed(() => droppedLinks.value.map((link) => LINK_NAMES[link]).join(", "));
@@ -39,7 +40,7 @@ onUnmounted(() => document.removeEventListener("fullscreenchange", onFullscreenC
       <button
         v-for="m in modes" :key="m.key"
         :class="['ck-seg-btn', 'mode-btn', { active: mode === m.key }]" :aria-pressed="mode === m.key"
-        :data-testid="`mode-${m.key}`" @click="mode = m.key"
+        :data-testid="`mode-${m.key}`" @click="editor.selectMode(m.key)"
       ><ConsoleIcon :name="m.icon" :size="15" />{{ m.label }}</button>
     </nav>
     <div class="spacer"></div>

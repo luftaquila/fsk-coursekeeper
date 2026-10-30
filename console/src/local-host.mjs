@@ -1,16 +1,17 @@
 import { computed } from "vue";
 import { createHttpTransport } from "fsk-coursekeeper/console/transport.mjs";
 import { createDeviceRegistry } from "fsk-coursekeeper/console/devices.mjs";
-import { deviceUrl } from "./settings.mjs";
+import { deviceUrl, loadSettings } from "./settings.mjs";
 
 // The standalone host: courses live in this browser, the person at the console
-// may do everything, and device addresses come from this browser's settings.
-export function createLocalHost({ course, settings }) {
+// may do everything, and device addresses come from this browser's settings,
+// read again on every refresh.
+export function createLocalHost({ course }) {
   const allowed = computed(() => true);
   return {
     course,
     devices: createDeviceRegistry({
-      load: async () => settings.devices.map(({ host, ...device }) => ({ ...device, url: deviceUrl(host) })),
+      load: async () => loadSettings().devices.map(({ host, ...device }) => ({ ...device, url: deviceUrl(host) })),
       createTransport: (url) => createHttpTransport(url, { credentials: "omit" }),
     }),
     access: { permission: () => allowed },

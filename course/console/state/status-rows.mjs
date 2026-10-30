@@ -10,7 +10,7 @@ import { NAV_LIGHT_MODES } from "./rover-store.mjs";
 const RELEASE_VERSION = /^v\d+\.\d+\.\d+$/;
 
 // Status summaries and detail rows of the rover and the GPS unit, shared by the
-// header badges, the device drawer and the Operate panel. A row is
+// header badges, the device panel and the Operate panel. A row is
 // [key, value, tone?]; tone ("ok" | "warn" | "bad" | "neutral") colours the value.
 export function createStatusRows({ host, clock, rover, gps, mission }) {
   const { roverStatus, lastPositionAge, ntripCorrectionAge } = rover;

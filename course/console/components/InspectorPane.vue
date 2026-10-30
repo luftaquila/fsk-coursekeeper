@@ -3,14 +3,16 @@ import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useConsoleState } from "../state/console.mjs";
 import ToolPalette from "./ToolPalette.vue";
 import DesignPanel from "./inspector/DesignPanel.vue";
+import DevicePanel from "./inspector/DevicePanel.vue";
 import OperatePanel from "./inspector/OperatePanel.vue";
 import ReviewPanel from "./inspector/ReviewPanel.vue";
 
-// The current mode's panel: a resizable column on desktop, a bottom sheet with
-// the tool palette on mobile. The sheet rests at one of three heights.
+// The current mode's panel, or the device panel while one is open: a resizable
+// column on desktop, a bottom sheet with the tool palette on mobile. The sheet
+// rests at one of three heights.
 const props = defineProps({ bottomInset: { type: Number, default: 0 } });
 const { course, editor } = useConsoleState();
-const { mode, isMobile, inspectorWidth } = editor;
+const { mode, isMobile, inspectorWidth, devicePanel } = editor;
 
 /* ── Desktop resize ───────────────────────────────── */
 let resizeId = null;
@@ -110,6 +112,10 @@ watch(editor.tool, (next) => {
 watch([editor.selectedConeId, editor.multiSelectedIds, editor.tool], ([id, set, t]) => {
   if (isMobile.value && t === "select" && snap.value === "peek" && (id != null || set.size > 0)) snap.value = "half";
 });
+// A device panel opened on a folded sheet would stay hidden under the head.
+watch(devicePanel, (open) => {
+  if (isMobile.value && open && snap.value === "peek") snap.value = "half";
+});
 </script>
 
 <template>
@@ -132,7 +138,8 @@ watch([editor.selectedConeId, editor.multiSelectedIds, editor.tool], ([id, set, 
       <div id="ck-sheet-tool"></div>
     </div>
     <div class="inspector-body">
-      <DesignPanel v-if="mode === 'design'" />
+      <DevicePanel v-if="devicePanel" />
+      <DesignPanel v-else-if="mode === 'design'" />
       <OperatePanel v-else-if="mode === 'operate'" />
       <ReviewPanel v-else />
     </div>

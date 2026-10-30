@@ -1,7 +1,6 @@
 <script setup>
 import { computed, onMounted, onUnmounted, ref } from "vue";
 import ConsoleIcon from "./components/ConsoleIcon.vue";
-import DeviceDrawer from "./components/DeviceDrawer.vue";
 import InspectorPane from "./components/InspectorPane.vue";
 import MissionBuilder from "./components/MissionBuilder.vue";
 import ToolPalette from "./components/ToolPalette.vue";
@@ -63,7 +62,7 @@ function onKeydown(e) {
     if (editor.rotating.value) editor.rotating.value = false;
     else if (editor.tool.value !== "select") editor.setTool("select");
     else if (editor.hasSelection.value) editor.clearSelection();
-    else if (editor.drawer.value) editor.drawer.value = null;
+    else if (editor.devicePanel.value) editor.devicePanel.value = null;
     else return;
     e.preventDefault();
     return;
@@ -125,14 +124,13 @@ onUnmounted(() => {
       <ToolPalette v-if="!isMobile" />
       <div class="map-column"><ConsoleMap /></div>
       <InspectorPane :bottom-inset="modeBar ? MODE_BAR_PX : 0" />
-      <DeviceDrawer />
     </div>
     <div v-else class="console-loading" role="status">Loading courses…</div>
 
     <nav v-if="modeBar" class="mode-bar" aria-label="Mode">
       <button
         v-for="m in modes" :key="m.key" :class="['mode-tab', { active: mode === m.key }]"
-        :aria-pressed="mode === m.key" :data-testid="`mode-${m.key}`" @click="mode = m.key"
+        :aria-pressed="mode === m.key" :data-testid="`mode-${m.key}`" @click="editor.selectMode(m.key)"
       ><ConsoleIcon :name="m.icon" /><span>{{ m.label }}</span></button>
     </nav>
 

@@ -152,7 +152,7 @@ function onUp(e) {
       <section class="ck-section">
         <div class="ck-section-head">
           <span class="ck-section-title">Rover</span>
-          <button class="ck-btn quiet" @click="editor.drawer.value = 'rover'"><ConsoleIcon name="calibrate" :size="15" />Details</button>
+          <button class="ck-btn quiet" @click="editor.devicePanel.value = 'rover'"><ConsoleIcon name="calibrate" :size="15" />Details</button>
         </div>
         <template v-if="connected">
           <div class="ck-row wrap summary">

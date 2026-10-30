@@ -45,7 +45,7 @@ async function boot() {
   }
   const settings = loadSettings();
   setBaseMapKey(settings.vworldKey);
-  const host = createLocalHost({ course: storage.transport, settings });
+  const host = createLocalHost({ course: storage.transport });
   await host.devices.refresh();
   const app = createApp(App, { persistent: storage.persistent, storage: storage.transport, settings });
   app.provide(HOST_KEY, host);

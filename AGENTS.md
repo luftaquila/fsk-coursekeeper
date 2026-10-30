@@ -30,7 +30,7 @@
   - 콘솔은 `course` 내부 모듈과 선언된 패키지만 import(`tests/course/console-boundary.test.mjs`)
 - 단독 콘솔(`console/`)은 코스 서비스를 Worker 안 SQLite WASM(`opfs-sahpool`)으로 실행. 릴리즈 때 GitHub Pages 배포
   - 브라우저 DB 연결은 하나뿐이라 탭 하나만 사용(Web Locks). OPFS가 없으면 메모리로 동작하고 경고 표시
-  - 장치 주소·VWorld 키는 브라우저 설정(localStorage). 변경 시 새로고침으로 연결 재구성
+  - 장치 주소·VWorld 키는 브라우저 설정(localStorage). 저장 시 페이지 새로고침 없이 콘솔(`CourseConsole`)을 다시 마운트해 연결 재구성
   - 공개 기능 없음. 코스 파일 내보내기·가져오기와 DB 백업·복원만
 - 미션 프리셋은 코스 데이터(코스 서비스 소유). 로버에는 미션 실행 원장만
 - 로버·GPS 유닛은 각자 tailnet에 API 제공. 브라우저가 장치에 직접 연결
