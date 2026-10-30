@@ -138,7 +138,6 @@ onUnmounted(() => clearInterval(poll));
 
     <section v-show="tab === 'antenna'" class="cal">
       <h3>Antenna offset <span v-if="antenna.sourceLabel" class="ck-badge">{{ antenna.sourceLabel }}</span></h3>
-      <p class="ck-hint">Rerun when the GPS antenna is moved or remounted.</p>
       <div class="ck-rows current">
         <span class="k">a_x</span><span class="v">{{ antenna.a_x }}</span>
         <span class="k">a_y</span><span class="v">{{ antenna.a_y }}</span>
@@ -164,7 +163,7 @@ onUnmounted(() => clearInterval(poll));
 
     <section v-show="tab === 'wheel'" class="cal">
       <h3>Wheel encoder scale</h3>
-      <p class="ck-hint">Rerun when tires or wheels are replaced, or when odometry or straight tracking disagrees with GPS. Needs 12 m ahead.</p>
+      <p class="ck-hint">Needs 12 m ahead.</p>
       <div class="ck-rows current">
         <span class="k">scale_l</span><span class="v">{{ wheel.scale_l }}</span>
         <span class="k">scale_r</span><span class="v">{{ wheel.scale_r }}</span>

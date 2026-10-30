@@ -15,7 +15,7 @@ function read() {
 export function loadSettings() {
   const stored = read();
   const devices = Array.isArray(stored.devices)
-    ? stored.devices.filter((device) => device && DEVICE_KINDS.includes(device.kind) && typeof device.url === "string")
+    ? stored.devices.filter((device) => device && DEVICE_KINDS.includes(device.kind) && isDeviceHost(device.host))
     : [];
   return { devices, vworldKey: typeof stored.vworldKey === "string" ? stored.vworldKey : "" };
 }
@@ -29,17 +29,18 @@ export function saveSettings(settings) {
   }
 }
 
-// Device APIs are reached over HTTPS on the tailnet; plain HTTP is only
-// accepted for a device on this machine during development.
-export function deviceUrlProblem(url) {
-  let parsed;
-  try {
-    parsed = new URL(url);
-  } catch {
-    return "Enter a full URL.";
-  }
-  const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
-  if (parsed.protocol !== "https:" && !(local && parsed.protocol === "http:")) return "Use an https:// URL.";
-  if (parsed.pathname !== "/" || parsed.search || parsed.hash) return "Enter the device address without a path.";
-  return null;
+// A tailnet host name, without scheme or path.
+export function isDeviceHost(s) {
+  return typeof s === "string" && /^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*(:\d{1,5})?$/.test(s);
+}
+
+export function deviceHostOf(input) {
+  return String(input ?? "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+}
+
+// Device APIs are reached at https://<host> on the tailnet; a device on this
+// machine is reached over plain HTTP during development.
+export function deviceUrl(host) {
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  return `${local ? "http" : "https"}://${host}`;
 }

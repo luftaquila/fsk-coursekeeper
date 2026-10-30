@@ -14,13 +14,13 @@ const {
 <template>
   <ConsoleDialog :title="preflightMode === 'resume' ? 'Pre-resume check' : 'Preflight check'" width="460px" @close="mission.cancelPreflight()">
     <p v-if="preflightMode === 'resume'" class="note">
-      Skips the {{ executedIndex }} completed items and continues only the remaining route stored on the server.
+      Continues after {{ executedIndex }} completed visits.
     </p>
     <p v-if="preflightEmptyRouteMode === 'return_only'" class="note">
-      Returns from the current position to the mission start point without visiting cones.
+      Returns to the mission start.
     </p>
     <p v-else-if="preflightEmptyRouteMode === 'resolve_uncertain'" class="note">
-      Resolves the uncertain last dispense result by operator judgment and completes the mission without further movement.
+      Completes the mission without moving or dispensing.
     </p>
     <ul class="checks" data-testid="preflight-checks">
       <li v-for="c in preflightChecks" :key="c.key" :class="['check', c.ok ? 'ok' : 'fail', { flash: preflightFlash[c.key] }]">

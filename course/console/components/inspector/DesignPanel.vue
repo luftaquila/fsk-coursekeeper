@@ -201,7 +201,6 @@ async function deleteAllCones() {
           <span class="ck-section-title">Route markers <span class="count">{{ activeRoute.markers.length }}</span></span>
           <button class="ck-btn quiet" :class="{ active: editor.tool.value === 'marker' }" @click.prevent="editor.setTool('marker')"><ConsoleIcon name="marker" :size="15" />Place</button>
         </summary>
-        <p class="ck-hint">With two or more visits, the centerline follows the visit order. One marker can be visited more than once.</p>
         <p v-if="routeError" class="route-error">{{ routeError }}</p>
         <div v-for="(marker, i) in activeRoute.markers" :key="marker.id" class="ck-row marker-row">
           <span class="marker-index">M{{ i + 1 }}</span>

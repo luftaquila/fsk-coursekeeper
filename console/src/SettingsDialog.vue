@@ -2,7 +2,7 @@
 import { computed, ref } from "vue";
 import ConsoleIcon from "fsk-coursekeeper/console/components/ConsoleIcon.vue";
 import { useNotification } from "fsk-coursekeeper/console/notify.mjs";
-import { deviceUrlProblem, saveSettings } from "./settings.mjs";
+import { deviceHostOf, isDeviceHost, saveSettings } from "./settings.mjs";
 
 const props = defineProps({
   settings: { type: Object, required: true },
@@ -15,8 +15,8 @@ const { error: notifyError } = useNotification();
 // A device's kind is fixed when it is added; the host names follow the
 // README's examples.
 const KINDS = {
-  rover: { label: "Rover", icon: "rover", example: "https://fsk-coursekeeper-rover.your-tailnet.ts.net" },
-  gps: { label: "GPS unit", icon: "gps", example: "https://fsk-coursekeeper-gps.your-tailnet.ts.net" },
+  rover: { label: "Rover", icon: "rover", example: "fsk-coursekeeper-rover.tailnet-name.ts.net" },
+  gps: { label: "GPS unit", icon: "gps", example: "fsk-coursekeeper-gps.tailnet-name.ts.net" },
 };
 
 const devices = ref(props.settings.devices.map((device) => ({ ...device })));
@@ -24,11 +24,11 @@ const vworldKey = ref(props.settings.vworldKey);
 const busy = ref(false);
 const importInput = ref(null);
 
-const problems = computed(() => devices.value.map((device) => deviceUrlProblem(device.url.trim())));
+const problems = computed(() => devices.value.map((device) => (isDeviceHost(deviceHostOf(device.host)) ? null : "Enter a host name.")));
 const canSave = computed(() => !busy.value && problems.value.every((problem) => problem == null));
 
 function addDevice(kind) {
-  devices.value.push({ id: crypto.randomUUID(), kind, label: KINDS[kind].label, url: "" });
+  devices.value.push({ id: crypto.randomUUID(), kind, label: KINDS[kind].label, host: "" });
 }
 
 function removeDevice(index) {
@@ -42,7 +42,7 @@ function save() {
       id: device.id,
       kind: device.kind,
       label: device.label.trim() || KINDS[device.kind].label,
-      url: device.url.trim().replace(/\/+$/, ""),
+      host: deviceHostOf(device.host),
     })),
     vworldKey: vworldKey.value.trim(),
   });
@@ -95,9 +95,9 @@ async function importDatabase(event) {
       <div v-for="(device, index) in devices" :key="device.id" class="device-row">
         <span class="device-kind"><ConsoleIcon :name="KINDS[device.kind].icon" :size="16" />{{ KINDS[device.kind].label }}</span>
         <input v-model="device.label" class="device-label" placeholder="Name" aria-label="Device name" />
-        <input v-model="device.url" class="device-url" :placeholder="KINDS[device.kind].example" aria-label="Device address" />
+        <input v-model="device.host" class="device-host" :placeholder="KINDS[device.kind].example" aria-label="Device host" />
         <button class="btn btn-ghost btn-sm" aria-label="Remove device" @click="removeDevice(index)">×</button>
-        <p v-if="device.url && problems[index]" class="device-problem">{{ problems[index] }}</p>
+        <p v-if="device.host && problems[index]" class="device-problem">{{ problems[index] }}</p>
       </div>
       <div class="row">
         <button class="btn btn-ghost btn-sm" @click="addDevice('rover')">+ Rover</button>
@@ -171,6 +171,6 @@ input {
   .settings-backdrop { padding-left: 0.75rem; padding-right: 0.75rem; }
   .settings { padding: 1rem; }
   .device-row { grid-template-columns: 5.5rem 1fr auto; }
-  .device-url { grid-column: 1 / -1; grid-row: 2; font-size: 0.85rem; }
+  .device-host { grid-column: 1 / -1; grid-row: 2; font-size: 0.85rem; }
 }
 </style>

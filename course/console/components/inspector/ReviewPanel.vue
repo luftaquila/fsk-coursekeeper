@@ -27,7 +27,6 @@ function showLogsView() {
     <section v-if="!configured" class="ck-section">
       <div class="ck-empty">
         <strong>No rover is set up</strong>
-        Mission records and logs come from the rover. Add its address in the console settings.
       </div>
     </section>
 

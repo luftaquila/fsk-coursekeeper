@@ -172,7 +172,7 @@ CONF
     dns="$(tailscale status --json | python3 -c 'import json, sys; print(json.load(sys.stdin)["Self"]["DNSName"].rstrip("."))')"
     echo
     echo "FSK Coursekeeper rover $VERSION is running."
-    echo "Console: Settings > Devices > add a rover at https://$dns"
+    echo "Console: Settings > Devices > add a rover at $dns"
     if [ -n "$reboot" ]; then
         echo "Reboot once to apply the fan and USB power options: sudo reboot"
     fi

@@ -453,8 +453,6 @@ function drop(index) {
       <header>
         <div>
           <h2>{{ editing ? 'Edit remaining mission route' : 'New mission route' }}</h2>
-          <p v-if="editing">Completed cones are kept. This only changes the route not yet visited.</p>
-          <p v-else>Pick the cones you want and set the visit order freely.</p>
         </div>
         <button class="close" aria-label="Close" :disabled="busy" @click="close">×</button>
       </header>
@@ -484,7 +482,6 @@ function drop(index) {
           <div class="section-title">
             <div>
               <strong>Course cones</strong>
-              <small>Tap the map or list to add or remove</small>
             </div>
             <span>{{ selectedIds.size }}/{{ cones.length }} cones</span>
           </div>
@@ -518,7 +515,6 @@ function drop(index) {
           <div class="section-title map-title">
             <div>
               <strong>Route map</strong>
-              <small>Dot color shows the cone side; purple numbers show the visit order</small>
             </div>
           </div>
           <div class="map-action-grid">
@@ -537,14 +533,12 @@ function drop(index) {
               <span><i class="legend-direction">›</i>Travel direction</span>
             </div>
           </div>
-          <p class="map-help">Tap a cone to add or remove it. The route runs from green to red in order; arrows show the travel direction.</p>
         </section>
 
         <section class="route-editor">
           <div class="section-title">
             <div>
               <strong>Route order</strong>
-              <small>Drag or enter an order number</small>
             </div>
             <span>{{ route.length }} visits</span>
           </div>
@@ -561,24 +555,23 @@ function drop(index) {
             <button class="danger-text" :disabled="route.length === 0" @click="clearRoute">Clear route</button>
           </div>
           <div v-if="duplicateIds.size" class="duplicate-warning">
-            {{ duplicateIds.size }} cones are visited more than once — each visit dispenses once.
+            {{ duplicateIds.size }} cones are visited more than once.
           </div>
           <div v-if="uncertainIds.size" class="uncertain-warning">
             {{ uncertainIds.size }} visits have an unconfirmed dispense result.
-            Remove them to skip dispensing again, or remove them and add the same cone as a new visit to dispense again.
+            Remove them to skip, or add the cone again to dispense again.
           </div>
           <div v-if="unavailableRouteItems.length" class="unavailable-warning">
-            {{ unavailableRouteItems.length }} cones were deleted from the current course.
-            Remove them or replace them with current course cones before applying, running, or saving.
+            {{ unavailableRouteItems.length }} cones were deleted from the course. Remove them.
           </div>
           <div v-if="route.length === 0 && emptyRouteMode === 'return_only'" class="empty-route-notice">
-            Returns from the current position to the mission start point without visiting cones.
+            Returns to the mission start.
           </div>
           <div v-else-if="route.length === 0 && emptyRouteMode === 'resolve_uncertain'" class="empty-route-notice uncertain-warning">
-            Explicitly completes the last visit with an uncertain dispense result without dispensing again.
+            Completes the mission without dispensing again.
           </div>
           <div v-else-if="route.length === 0" class="empty">
-            A regular mission needs at least one remaining cone. Add cones or explicitly choose to return to the start point.
+            No cones in the route.
           </div>
           <div ref="routeListElement" class="route-list">
             <div
@@ -676,12 +669,6 @@ function drop(index) {
 .mission-builder > footer { border-top: 1px solid var(--border, #334155); }
 .mission-builder > header > div { min-width: 0; }
 .mission-builder h2 { margin: 0; font-size: 1.18rem; line-height: 1.3; }
-.mission-builder header p {
-  margin: .25rem 0 0;
-  color: var(--text-secondary, #94a3b8);
-  font-size: .82rem;
-  line-height: 1.4;
-}
 
 .mission-builder input,
 .mission-builder select,
@@ -786,13 +773,6 @@ function drop(index) {
 
 .section-title > div { min-width: 0; }
 .section-title strong { display: block; font-size: .98rem; line-height: 1.3; }
-.section-title small {
-  display: block;
-  margin-top: .12rem;
-  color: var(--text-secondary, #94a3b8);
-  font-size: .72rem;
-  line-height: 1.3;
-}
 .section-title > span {
   flex: 0 0 auto;
   color: #cbd5e1;
@@ -1007,12 +987,6 @@ function drop(index) {
   font-weight: 900;
   line-height: 1;
 }
-.map-help {
-  margin: .45rem 0 0;
-  color: var(--text-secondary, #94a3b8);
-  font-size: .7rem;
-  line-height: 1.35;
-}
 
 .route-list { margin-top: .05rem; }
 .route-row {
@@ -1146,7 +1120,6 @@ function drop(index) {
   }
   .mission-builder > header,
   .mission-builder > footer { padding: .75rem; }
-  .mission-builder header p { font-size: .74rem; }
   .preset-row {
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
     padding: .6rem .75rem;

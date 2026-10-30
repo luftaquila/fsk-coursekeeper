@@ -8,8 +8,8 @@ const SETTINGS_KEY = "fsk-coursekeeper.settings";
 // browser context has its own course storage, so each test starts empty.
 export async function openConsole(page, { rover = false, gps = false } = {}) {
   const devices = [];
-  if (rover) devices.push({ id: "rover", kind: "rover", label: "Rover", url: process.env.E2E_ROVER_URL });
-  if (gps) devices.push({ id: "gps", kind: "gps", label: "GPS unit", url: process.env.E2E_GPS_URL });
+  if (rover) devices.push({ id: "rover", kind: "rover", label: "Rover", host: new URL(process.env.E2E_ROVER_URL).host });
+  if (gps) devices.push({ id: "gps", kind: "gps", label: "GPS unit", host: new URL(process.env.E2E_GPS_URL).host });
   // Map tiles and web fonts are not part of what is tested.
   await page.route(/^https?:\/\/(?!127\.0\.0\.1)/, (route) => route.abort());
   await page.addInitScript(([key, value]) => localStorage.setItem(key, value),

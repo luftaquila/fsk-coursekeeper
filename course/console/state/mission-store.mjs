@@ -705,7 +705,7 @@ export function createMissionStore({ notify, course, rover }) {
       const response = await roverRequest(`/api/missions/${missionId}/end`, { method: "POST" });
       const data = await response.json();
       if (applyMissionCommandResponse(data, "end", authorityToken)) {
-        notifyWarn("Mission end requested. The route and controls stay as they are until the rover confirms the stop.");
+        notifyWarn("Mission end requested.");
       }
     } catch (err) {
       await reconcileMissionEndRequestFailure(missionId);

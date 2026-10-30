@@ -144,7 +144,6 @@ function onUp(e) {
     <section v-if="!configured" class="ck-section">
       <div class="ck-empty">
         <strong>No rover is set up</strong>
-        Add the rover's address in the console settings to plan and run missions here.
       </div>
     </section>
 
@@ -166,8 +165,7 @@ function onUp(e) {
           </dl>
         </template>
         <p v-else class="ck-hint offline">
-          Offline<template v-if="status.disconnect.value?.ago"> for {{ status.disconnect.value.ago }}</template>.
-          The rover connects on its own once it is powered and on the tailnet.
+          Offline<template v-if="status.disconnect.value?.ago"> for {{ status.disconnect.value.ago }}</template>
         </p>
       </section>
 
@@ -221,7 +219,6 @@ function onUp(e) {
         </template>
 
         <template v-else-if="roverMode === 'stopped'">
-          <p class="ck-hint">The mission is held on the rover and can continue from where it stopped.</p>
           <button class="ck-btn primary lg block" :disabled="pathButtonDisabled" @click="mission.onPathBtn()">
             <ConsoleIcon name="play" :size="16" />{{ pathBtnLabel }}
           </button>

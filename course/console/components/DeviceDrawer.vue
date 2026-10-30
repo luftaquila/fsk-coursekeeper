@@ -100,16 +100,16 @@ watch(editor.selectedSurveyPointId, (id) => {
 
         <section class="ck-section">
           <div class="ck-section-head"><span class="ck-section-title">Corrections</span></div>
-          <p v-if="gps.baseNoReceiver.value" class="alert">The GPS unit is not acting as a base station. Connect it, or switch to NGII.</p>
+          <p v-if="gps.baseNoReceiver.value" class="alert">The GPS unit is not acting as a base station.</p>
           <div class="sources" role="radiogroup" aria-label="Rover correction source">
             <label :class="['source', { active: gps.gpsConfig.value.ntrip_source === 'ngii' }]">
               <input type="radio" :checked="gps.gpsConfig.value.ntrip_source === 'ngii'" :disabled="gps.gpsSaving.value" @change="gps.setNtripSource('ngii')" />
-              <span><strong>NGII network</strong><span class="ck-hint">Nearest NGII base station, picked automatically</span></span>
+              <span><strong>NGII network</strong></span>
             </label>
             <label :class="['source', { active: gps.gpsConfig.value.ntrip_source === 'base', disabled: !gps.hasSurveyedPoint.value }]">
               <input type="radio" :checked="gps.gpsConfig.value.ntrip_source === 'base'" :disabled="gps.gpsSaving.value || !gps.hasSurveyedPoint.value"
                 @change="gps.setNtripSource('base', gps.selectedBasePointId.value)" />
-              <span><strong>GPS unit as base station</strong><span class="ck-hint">{{ gps.hasSurveyedPoint.value ? "The unit on a surveyed point sends corrections" : "Survey a point with the GPS unit first" }}</span></span>
+              <span><strong>GPS unit as base station</strong><span v-if="!gps.hasSurveyedPoint.value" class="ck-hint">Survey a point first</span></span>
             </label>
           </div>
           <label v-if="gps.gpsConfig.value.ntrip_source === 'base'" class="ck-field spaced">Base point
@@ -158,7 +158,6 @@ watch(editor.selectedSurveyPointId, (id) => {
             <span class="ck-section-title">Calibration</span>
             <button class="ck-btn" :disabled="!roverStatus.connected" @click="showCalibration = true"><ConsoleIcon name="calibrate" :size="15" />Open</button>
           </div>
-          <p class="ck-hint">Antenna offset and wheel encoder scale.</p>
         </section>
 
         <section class="ck-section">
@@ -189,7 +188,6 @@ watch(editor.selectedSurveyPointId, (id) => {
               </span>
             </label>
           </form>
-          <p class="ck-hint spaced">The unit needs it for RTK and for surveying base-station positions.</p>
         </section>
 
         <section class="ck-section">
@@ -198,7 +196,7 @@ watch(editor.selectedSurveyPointId, (id) => {
             <input v-model="newPointName" class="ck-input ck-grow" placeholder="Survey point name" maxlength="100" aria-label="Survey point name" />
             <button class="ck-btn primary" type="submit" :disabled="!newPointName.trim()">Add</button>
           </form>
-          <div v-if="gps.surveyPoints.value.length === 0" class="ck-empty">No survey points. A surveyed point lets the unit serve as a base station.</div>
+          <div v-if="gps.surveyPoints.value.length === 0" class="ck-empty">No survey points.</div>
           <ul v-else class="points">
             <li
               v-for="p in gps.surveyPoints.value" :key="p.id" :data-survey-id="p.id"
