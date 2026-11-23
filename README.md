@@ -1,64 +1,64 @@
 # Formula Student Korea Coursekeeper
 
-Course design and cone layout system for Formula Student Korea dynamic events.
+Autonomous cone layout rover system for Formula Student Korea dynamic event courses.
 
 ## Features
 
-* Course design on satellite imagery
-   * Export as an Assetto Corsa track
-* RTK GPS rover that drives to each cone position and marks it
-* Handheld RTK GPS unit that captures cone positions or serves as the rover's base station
-* [Web console](https://luftaquila.github.io/fsk-coursekeeper/) that keeps courses in the browser
+* RTK GPS autonomous rover that drives to each cone position and marks it
+* Handheld RTK GPS unit that captures cone positions
+* [Web console](https://luftaquila.github.io/fsk-coursekeeper/) that designs courses on satellite imagery
 
 ## Usage
 
 ### 1. Prepare
 
-1. Open the [web console](https://luftaquila.github.io/fsk-coursekeeper/).
-2. In `Settings`, add each device with `+ Rover` or `+ GPS unit` and its address, then click `Save`.
-3. Click the `Rover` badge in the header and save an NGII account ID under `Rover NGII login`.
-   * Save one for the GPS unit under `GPS unit` → `NGII login`.
-4. To use the GPS unit as the rover's base station instead of the NGII network:
-   * Place the GPS unit on a fixed point, add the point under `GPS unit` → `Survey points`, and click `Survey`.
-   * Under `Rover` → `Corrections`, select `GPS unit as base station` and the point.
+1. Log in to your [tailnet](https://tailscale.com/docs/concepts/tailnet) and open the [web console](https://luftaquila.github.io/fsk-coursekeeper/).
+2. Save the rover's tailnet address with `+ Rover` in `Settings`.
+3. Turn on the rover and wait for it to connect.
+4. Save your NGII account email in `Rover NGII login` on the `Rover` badge.
+   * For a new account, sign up at the [NGII GNSS Data Center](https://www.gnssdata.or.kr/main/getMainView.do).
 
-### 2. Design a course
+### 2. Course design
 
 1. Enter a name in the course menu at the top left and click `Create`.
-2. Select `Add cones`, choose the cone side with `L`, `C`, or `R`, and tap the map.
-   * The capture button adds a cone at the GPS unit's position, or at the rover's when the GPS unit is unavailable.
+2. At each cone position, choose a side with `L`, `C`, or `R` and click the capture button.
+   * It captures the GPS unit's position, or the rover's without a GPS unit.
+   * To add cones manually, select `Add cones` and tap the map.
 
-The export button in the course menu downloads the course as an Assetto Corsa track, a JSON file, and a preview image.
+To export a course, click its download button in the course menu.\
+The ZIP includes an Assetto Corsa track, the course data JSON, and a preview image.
 
-### 3. Lay out the cones
+### 3. Rover operation
 
-1. In `Operate`, click `Plan a mission`, pick the cones and their order, and click `Apply route`.
-2. Click `Check and run`, review the preflight check, and click `Run`.
-   * The rover stops at each cone, marks it, and moves on.
+1. Turn on the rover and wait for it to connect.
+2. In `Operate`, click `Plan a mission`, pick the cones in order, and click `Check and run`.
+3. Review the preflight check and click `Run`.
 
 > [!IMPORTANT]
 > `Emergency stop` in the header or the E-stop button on the rover stops the rover at any time.\
 > The rover keeps running its mission when the console or the network drops.
 
-| Status light | Rover |
+| MCU Status light | Rover |
 | --- | --- |
-| White | Booting |
 | Green | Idle |
 | Blue | Driving |
 | Amber | Low battery |
-| Orange, blinking | Mission paused, or halted by a GPS fault |
-| Magenta | Battery undervoltage; motors off |
+| Orange, blinking | Mission paused, or stopped by an error |
+| Magenta | Battery undervoltage |
 | Red, blinking | E-stop |
 | Off | No link to the Raspberry Pi |
 
 ### 4. Review
 
-* `Review` → `Missions`: replay a recorded mission on the map.
-* `Review` → `Rover logs`: click `Fetch from rover` to load the rover's latest logs.
+Missions and logs are read from the rover. Turn it on and open `Review`.
+
+* `Missions`: replay a recorded mission on the map.
+* `Rover logs`: click `Fetch from rover` to load the latest logs.
 
 > [!IMPORTANT]
 > Courses are saved in the browser. Back them up with `Settings` → `Export backup`.\
-> If the console warns that this browser cannot save courses, export your courses before closing the page.
+> If a storage warning appears, export your courses before closing the page.\
+> To import an exported course, enter a name in the course menu, click the upload button, and select its JSON.
 
 ## Do It Yourself!
 
@@ -70,23 +70,21 @@ The export button in the course menu downloads the course as an Assetto Corsa tr
 | Qty | Part |
 | ---: | --- |
 | 1x | Wheeltec R550 AKM Plus Ackermann chassis |
-| 2x | MD36L P27 DC gearmotor with a 500 PPR encoder |
-| 1x | Wheeltec S20F steering servo |
 | 1x | Cytron MDD10A motor driver |
-| 1x | Raspberry Pi 5 |
-| 1x | 8–32 V to 5 V, 30 W DC-DC converter for the Raspberry Pi |
+| 1x | Raspberry Pi 5 (4GB+) |
+| 1x | 8–32 V to 5 V, 25 W DC-DC converter |
 | 1x | u-blox ZED-F9P GNSS receiver with antenna |
 | 1x | Waveshare RP2040-Zero |
-| 1x | Rover PCB with the parts in [`BOM-pcb.csv`](rover/pcb/jlcpcb/production_files/BOM-pcb.csv) |
+| 1x | Rover PCB (See below) |
 | 1x | 25.6 V (8S) 6.6 Ah LiFePO4 battery with BMS and XT60 connector |
 | 1x | Peristaltic pump with an IRLZ44N MOSFET and a 1N4007 diode |
 | 1x | Normally closed momentary E-stop button |
-| 2x | NeoPixel Stick (8× WS2812) |
-| 1x | Red/green navigation light module (3-pin) |
+| 2x | NeoPixel Stick (8× WS2812, Optional) |
+| 1x | Red/green navigation light module (3-pin, Optional) |
 
 </details>
 
-1. Order the rover PCB from JLCPCB with [`GERBER-pcb.zip`](rover/pcb/jlcpcb/production_files/GERBER-pcb.zip) and solder its parts.
+1. Order the PCB from JLCPCB with [`GERBER-pcb.zip`](rover/pcb/jlcpcb/production_files/GERBER-pcb.zip) and solder its parts.
 2. Wire the PCB:
 
    | Connector | Wire to |
@@ -106,22 +104,28 @@ The export button in the course menu downloads the course as an Assetto Corsa tr
 ### 2. Install the rover
 
 1. Write Raspberry Pi OS Lite (64-bit) with Raspberry Pi Imager.
-   * In the OS customisation, set a host name such as `fsk-coursekeeper-rover`, a user, an SSH key, and the Wi-Fi network.
-2. Run on the rover over SSH:
+   * In the OS customisation, set a host name such as `fsk-coursekeeper-rover`, a user, an SSH key, and Wi-Fi.
+2. Enable MagicDNS and HTTPS certificates in the Tailscale admin console.
+3. Run on the rover over SSH:
 
    ```sh
    curl -fsSL https://github.com/luftaquila/fsk-coursekeeper/releases/latest/download/install-rover.sh | sudo bash
    ```
 
-   * On the first run, open the printed link and log in to your tailnet.
-   * Enable MagicDNS and HTTPS certificates in the tailnet.
-   * Reboot once if the installer asks.
-3. Flash `fsk-coursekeeper-rover-mcu.uf2` from the [latest release](https://github.com/luftaquila/fsk-coursekeeper/releases/latest) to the RP2040-Zero:
-   * First time: connect it to a computer while holding `BOOT`, then copy the file to the `RPI-RP2` drive.
-   * After that: run `sudo flash-mcu fsk-coursekeeper-rover-mcu.uf2` on the rover.
-4. In the console, add the rover with the address the installer prints.
-5. Under `Rover` → `Battery`, enter a multimeter reading with `Calibrate voltage`.
-6. Under `Rover` → `Calibration`, run the `Antenna` and `Wheels` auto calibration.
+   * Open the printed link and log in to your tailnet.
+   * Reboot if the installer asks.
+4. Hold `BOOT` and press `RESET` on the RP2040-Zero, then flash the MCU firmware:
+
+   ```sh
+   curl -fsSLO https://github.com/luftaquila/fsk-coursekeeper/releases/latest/download/fsk-coursekeeper-rover-mcu.uf2
+   sudo flash-mcu fsk-coursekeeper-rover-mcu.uf2
+   ```
+
+5. Follow [Prepare](#1-prepare) with the address the installer prints.
+6. Click `Calibrate voltage` under `Battery`, enter the battery voltage measured with a multimeter, and click `Save`.
+7. Take the rover outdoors and click `Open` under `Calibration`.
+8. Click `Start` in `Antenna`, then in `Wheels`.
+   * `Antenna` needs 5 m of space on every side, and `Wheels` needs 12 m ahead.
 
 > [!TIP]
 > Run `Antenna` again after moving the GPS antenna, and `Wheels` after replacing a wheel.
@@ -138,19 +142,26 @@ Required: Raspberry Pi Zero 2 W, u-blox ZED-F9P GNSS receiver with antenna.
    curl -fsSL https://github.com/luftaquila/fsk-coursekeeper/releases/latest/download/install-gps.sh | sudo bash
    ```
 
-4. In the console, add the GPS unit with the address the installer prints.
+   * Open the printed link and log in to your tailnet.
+4. Add the address the installer prints with `+ GPS unit` in `Settings` and click `Save`.
+5. Click the `GPS unit` badge, enter your NGII account email in `NGII login`, and click `Save`.
 
 ### 4. Update
 
-```sh
-sudo fsk-coursekeeper-update latest   # or a version such as v1.2.3
-```
+The web console always runs the latest release. Update every device when a new release is out.
 
-> [!IMPORTANT]
-> Every device and the web console must run the same release.
+1. Run on each device over SSH:
 
-> [!TIP]
-> If a device is unreachable, write its SD card again and reinstall.
+   ```sh
+   sudo fsk-coursekeeper-update latest
+   ```
+
+2. Flash the MCU firmware on the rover:
+
+   ```sh
+   curl -fsSLO https://github.com/luftaquila/fsk-coursekeeper/releases/latest/download/fsk-coursekeeper-rover-mcu.uf2
+   sudo flash-mcu fsk-coursekeeper-rover-mcu.uf2
+   ```
 
 ## Development
 
@@ -175,7 +186,7 @@ sudo fsk-coursekeeper-update latest   # or a version such as v1.2.3
 
   ```sh
   cd rover/pilot
-  python3 -m pip install -r requirements.txt
+  python3 -m pip install -r requirements.txt pytest
   python3 -m pytest test/
   ```
 
@@ -185,7 +196,7 @@ sudo fsk-coursekeeper-update latest   # or a version such as v1.2.3
 
   ```sh
   cd rover/gps
-  python3 -m pip install -r requirements.txt
+  python3 -m pip install -r requirements.txt pytest
   python3 -m pytest test/
   ```
 
@@ -194,7 +205,7 @@ sudo fsk-coursekeeper-update latest   # or a version such as v1.2.3
 * Requires: CMake, Arm GNU Toolchain (`arm-none-eabi-gcc`, newlib), Pico SDK 2.1.1
 
   ```sh
-  PICO_SDK_PATH=<pico-sdk> cmake -S rover/mcu -B rover/mcu/build -DPICO_BOARD=pico
+  PICO_SDK_PATH=<pico-sdk> cmake -S rover/mcu -B rover/mcu/build
   cmake --build rover/mcu/build
   ```
 
