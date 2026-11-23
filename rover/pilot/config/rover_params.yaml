@@ -171,9 +171,8 @@ navigator_node:
     fix_recovery_hold_s: 3.0
     return_to_start: true
 
-    # Battery state-of-charge gates (the MCU has its own hard cutoff at
-    # BATTERY_UNDERVOLT_V=20 V; these stop the navigator earlier so motors
-    # don't cut out mid-dock).
+    # Battery state-of-charge gates (the MCU only flags BATTERY_UNDERVOLT_V=20 V
+    # and does not cut the motors).
     battery_warn_pct: 20               # below this, refuse to start a new mission
     battery_abort_pct: 10              # below this, abort an active mission and ERROR
 

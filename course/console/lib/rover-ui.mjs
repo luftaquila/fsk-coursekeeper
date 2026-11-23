@@ -32,12 +32,12 @@ export const FIX_STATUS_META = {
 
 // MCU status-flag bits (rover/mcu T-frame `flags`, see rover/mcu/src/protocol.h).
 // The MCU status LED encodes these by colour (red=e-stop, magenta=undervolt,
-// yellow=heartbeat/batt-warn, orange=nav-GPS-lost); the nav state only says
+// amber=batt-warn, off=heartbeat, orange=nav-GPS-lost); the nav state only says
 // "ERROR", so we decode them into a plain-English cause list.
 export const MCU_FLAG = {
   ESTOP: 0x01,        // combined sw+hw E-stop latch
   HEARTBEAT: 0x02,    // Pi↔MCU heartbeat timeout (motors gated)
-  UNDERVOLT: 0x04,    // battery ≤20 V (motors gated)
+  UNDERVOLT: 0x04,    // battery ≤20 V
   BATT_WARN: 0x08,    // battery ≤22 V
   NAV_GPS_LOST: 0x40, // Pi-reported navigation GPS loss
   ESTOP_LINE: 0x80,   // raw physical E-stop button line
@@ -71,13 +71,13 @@ export function roverFaultRows(s) {
       ? ["E-STOP", "Hardware E-stop button pressed", "bad"]
       : ["E-STOP", "Software E-stop (operator or server)", "bad"]);
   }
-  // Pi↔MCU link (LED: yellow).
+  // Pi↔MCU link (LED: off).
   if (flags & MCU_FLAG.HEARTBEAT) {
     rows.push(["LINK", "Pi↔MCU heartbeat timeout — motors gated", "bad"]);
   }
-  // Battery (LED: magenta = undervolt, yellow = warn).
+  // Battery (LED: magenta = undervolt, amber = warn).
   if (flags & MCU_FLAG.UNDERVOLT) {
-    rows.push(["BATTERY", "Undervolt cutoff (≤20 V) — motors gated", "bad"]);
+    rows.push(["BATTERY", "Battery undervoltage (≤20 V)", "bad"]);
   } else if (flags & MCU_FLAG.BATT_WARN) {
     rows.push(["BATTERY", "Low-battery warning (≤22 V)", "warn"]);
   } else if (s.battery?.percent != null && s.battery.percent <= BATTERY_CRIT_PERCENT) {

@@ -220,10 +220,9 @@ class NavigatorNode(Node):
         # potentially-drifted estimate.
         self.declare_parameter('fix_accept_float_max_h_acc_mm', 0)
         self.declare_parameter('return_to_start', True)
-        # Battery thresholds. The MCU has its own hard cutoff at
-        # BATTERY_UNDERVOLT_V (20 V); these gate the navigator earlier so
-        # we don't start a mission with a marginal pack and so we ERROR
-        # gracefully instead of having motors cut out mid-dock.
+        # Battery thresholds. The MCU only flags BATTERY_UNDERVOLT_V (20 V)
+        # and does not cut the motors, so these are the low-battery gates:
+        # no new mission on a marginal pack, and an active one stops in ERROR.
         self.declare_parameter('battery_warn_pct', 20)
         self.declare_parameter('battery_abort_pct', 10)
 
@@ -1699,8 +1698,8 @@ class NavigatorNode(Node):
             State.SPRAYING, State.CAL_ANTENNA, State.CAL_WHEELS,
         )
         if self._state in active_states:
-            # Battery critical — stop and ERROR before motors cut out under
-            # the MCU's hard cutoff (BATTERY_UNDERVOLT_V) mid-mission.
+            # Battery critical — stop and ERROR. The MCU does not cut the
+            # motors on undervoltage, so this is the mission's low-battery stop.
             abort_pct = self.get_parameter('battery_abort_pct').value
             if (self._battery_pct is not None
                     and self._battery_pct < abort_pct):
