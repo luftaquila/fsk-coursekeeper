@@ -51,6 +51,16 @@ test("worker failures leave the map usable without synchronous route calculation
   f.calculator.dispose();
 });
 
+test("a course without enough boundary cones has no centerline instead of an error", async () => {
+  const { publicCourseGeometry } = await import("../../course/console/lib/public-course-geometry.worker.mjs");
+  const sparse = {
+    course: { id: 1 },
+    cones: [{ id: 1, side: "left", lat: 35.292, lng: 126.574 }, { id: 2, side: "right", lat: 35.2921, lng: 126.5741 }],
+    route: { markers: [], steps: [] },
+  };
+  assert.deepEqual(publicCourseGeometry(sparse), { line: null });
+});
+
 test("the actual worker preserves route geometry and frees the caller before completion", async (t) => {
   const { Worker } = await import("node:worker_threads");
   const { readFileSync } = await import("node:fs");
